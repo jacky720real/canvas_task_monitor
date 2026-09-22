@@ -6,6 +6,9 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+#: 任务状态：由用户在本地维护，LLM 与任何自动流程都无权改写（见 storage/task_repo.py）
+TaskStatus = Literal["pending", "done"]
+
 
 class RawItem(BaseModel):
     """采集器返回的原始条目（事实层，未经任何 AI 处理）。
@@ -65,7 +68,17 @@ class ChangeRecord(BaseModel):
 
 
 class TaskItem(BaseModel):
-    """LLM 抽取后落库的结构化任务。"""
+    """LLM 抽取后的任务。
+
+    【extra 行为说明】
+    - 使用默认 extra="ignore"：LLM 若输出 schema 合法但本模型没有的字段
+      （如 change_type），会被静默丢弃，不报错。
+    - 理由：schema 与模型的字段集不要求严格同步。schema 是"对 LLM 的契约"，
+      模型是"落库结构"。change_type 的权威来源是 change_detector，不需要
+      再落到 tasks 表——保留在 raw_json 里即可。
+    - 唯一例外是 score：extractor 在构造前会显式 pop（见 ai/extractor.py
+      的 _drop_forbidden_score），因为 score 是 LLM 高频误输出的历史包袱。
+    """
 
     id: int | None = None
     source: str
@@ -83,7 +96,7 @@ class TaskItem(BaseModel):
     is_rule: bool = False
     urgency_reason: str = ""
     importance_reason: str = ""
-    status: Literal["pending", "done"] = "pending"
+    status: TaskStatus = "pending"
     # 注意：status 由本地用户维护（勾选完成 / 取消完成），LLM 不参与，
     # task_repo.upsert() 的 SET 子句也刻意排除它，见 storage/task_repo.py。
     raw_json: str = ""

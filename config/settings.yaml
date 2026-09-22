@@ -4,7 +4,7 @@
 app:
   db_path: "./data/tasks.db"
   log_level: INFO
-  timezone: "Asia/Shanghai"
+  # timezone: "Asia/Shanghai"   # 预留字段，当前未使用（prompt 里的 now_iso 用系统时区）
 
 poll:
   interval_seconds: 600
@@ -51,6 +51,12 @@ ai:
   model: "${LLM_MODEL}"
   temperature: 0.1
   max_output_tokens: 2000
+  timeout: 60                      # ★ 新增，LLM HTTP 超时（秒）
+  retry:                           # ★ 新增，tenacity 重试参数
+    max_attempts: 3
+    backoff_multiplier: 1.5
+    backoff_min: 2
+    backoff_max: 20
   skip_if_no_changes: true
   batch_size: 5                    # 单次送 LLM 最多几条变更
   score_weights:                   # ★ score 由代码计算

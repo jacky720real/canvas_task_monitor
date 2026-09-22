@@ -10,9 +10,9 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, get_args
 
-from ..core.models import TaskItem
+from ..core.models import TaskItem, TaskStatus
 from .db import Database, utc_now_iso
 
 # ★ status 绝对不出现在下面的 SET 子句里，原因见 SQL 内注释。
@@ -49,7 +49,7 @@ _SELECT_ID_SQL = "SELECT id FROM tasks WHERE source = ? AND external_id = ?"
 _SELECT_BY_ID_SQL = "SELECT * FROM tasks WHERE id = ?"
 _UPDATE_STATUS_SQL = "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?"
 
-_ALLOWED_STATUS = ("pending", "done")
+_ALLOWED_STATUS: tuple[str, ...] = get_args(TaskStatus)
 
 
 class TaskRepo:
@@ -127,7 +127,7 @@ class TaskRepo:
             row = self.db.conn.execute(_SELECT_BY_ID_SQL, (task_id,)).fetchone()
         return None if row is None else dict(row)
 
-    def set_status(self, task_id: int, status: str) -> bool:
+    def set_status(self, task_id: int, status: TaskStatus) -> bool:
         """更新任务状态（仅 pending / done），返回是否命中行。
 
         这是唯一允许改写 status 的入口：只由用户显式操作触发。
