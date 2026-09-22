@@ -1,0 +1,60 @@
+# canvas_task_monitor 运行配置
+# 带 ${XXX} 的值为环境变量占位符，加载时由 core/config.py 递归替换（来源：进程环境变量或项目根目录的 .env）。
+
+app:
+  db_path: "./data/tasks.db"
+  log_level: INFO
+  timezone: "Asia/Shanghai"
+
+poll:
+  interval_seconds: 600
+  sources: [canvas, mail]
+  jitter_seconds: 30
+
+canvas:
+  base_url: "${CANVAS_BASE_URL}"
+  token: "${CANVAS_TOKEN}"
+  timeout: 20
+  rate_limit_rps: 3
+  retry:
+    max_attempts: 3
+    backoff_base: 1.5
+  lookback_days: 30
+
+mail:
+  provider: "graph"        # graph | imap
+  graph:
+    tenant_id: "${MS_TENANT_ID}"
+    client_id: "${MS_CLIENT_ID}"
+    client_secret: "${MS_CLIENT_SECRET}"
+    user: "${MS_USER_UPN}"
+    mailbox_folder: "Inbox"
+    filter_from_domains: ["instructure.com", "canvas.instructure.com"]
+    rate_limit_rps: 2      # ★ 与 canvas 独立的限流
+    lookback_days: 7       # ★ 与 canvas 的 30 天不同：邮箱只需近期通知
+    retry:                 # ★ 与 canvas 段对齐
+      max_attempts: 3
+      backoff_base: 1.5
+  imap:
+    host: "${IMAP_HOST}"
+    port: 993
+    username: "${IMAP_USER}"
+    password: "${IMAP_PASSWORD}"
+    folder: "INBOX"
+    rate_limit_rps: 2      # ★ 独立限流
+    lookback_days: 7       # ★ 与 canvas 的 30 天不同：邮箱只需近期通知
+
+ai:
+  provider: "openai_compat"
+  base_url: "${LLM_BASE_URL}"
+  api_key: "${LLM_API_KEY}"
+  model: "${LLM_MODEL}"
+  temperature: 0.1
+  max_output_tokens: 2000
+  skip_if_no_changes: true
+  batch_size: 5                    # 单次送 LLM 最多几条变更
+  score_weights:                   # ★ score 由代码计算
+    urgency: 10
+    importance: 8
+
+template_path: "./config/templates/task_extract_template.yaml"

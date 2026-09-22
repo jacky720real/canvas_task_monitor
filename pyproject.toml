@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "canvas-task-monitor"
+version = "0.1.0"
+description = "Canvas LMS 与 Microsoft 365 邮箱学习任务监控：采集 → 变更检测 → 结构化抽取"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "httpx",
+    "pydantic>=2",
+    "pyyaml",
+    "jsonschema",
+    "python-dotenv",
+    "tenacity",
+    "rich",
+]
+
+[project.optional-dependencies]
+# MCP 形态入口（mcp_server.py）所需
+mcp = ["mcp>=1.0.0"]
+# DSH 形态入口（dsh_plugin.py）所需；包名占位，待确认后替换
+dsh = ["deepseek-harness-sdk>=0.1"]
+dev = ["pytest", "pytest-asyncio", "ruff"]
+all = ["canvas-task-monitor[mcp,dsh]"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["src"]

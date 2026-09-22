@@ -1,0 +1,24 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ---- 本地数据（SQLite 快照库及其 WAL 附属文件）----
+data/
+*.db
+*.db-wal
+*.db-shm
+logs/
+
+# ---- 本地配置与密钥 ----
+.env
+.env.local
