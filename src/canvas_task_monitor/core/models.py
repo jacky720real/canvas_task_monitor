@@ -12,6 +12,7 @@ class RawItem(BaseModel):
 
     source 取条目级来源：canvas_assignment / canvas_announcement / mail。
     它既决定内容哈希的字段白名单（见 core/hashing.py），也是 tasks 表主键的一半。
+    payload 是该条目的原始字段字典，哈希白名单就是从它里面取字段。
     """
 
     source: str
@@ -20,7 +21,7 @@ class RawItem(BaseModel):
     # 后续同 ID 邮件被视作同一封，属于可接受的降级行为。
     external_id: str
     course_id: str | None = None
-    data: dict[str, Any] = Field(default_factory=dict)
+    payload: dict[str, Any] = Field(default_factory=dict)
 
 
 class ChangeRecord(BaseModel):
@@ -57,7 +58,7 @@ class ChangeRecord(BaseModel):
             external_id=item.external_id,
             change_type=change_type,
             course_id=item.course_id,
-            data=item.data,
+            data=item.payload,
             diff={"hash": {"from": prev_hash, "to": new_hash}},
             item=item,
         )

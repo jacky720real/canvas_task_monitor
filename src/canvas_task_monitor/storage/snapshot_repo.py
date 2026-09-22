@@ -73,8 +73,8 @@ class SnapshotRepo:
                 item.source,
                 item.external_id,
                 item.course_id,
-                canonical_hash(item.source, item.data),
-                json.dumps(item.data, ensure_ascii=False, sort_keys=True, default=str),
+                canonical_hash(item.source, item.payload),
+                json.dumps(item.payload, ensure_ascii=False, sort_keys=True, default=str),
                 now,
                 now,
             )
