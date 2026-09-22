@@ -93,3 +93,24 @@ def _replace_env_in_text(text: str) -> str:
         return env_value
 
     return _ENV_PLACEHOLDER.sub(_substitute, text)
+
+
+def is_unresolved_placeholder(value: Any) -> bool:
+    """判断值是否仍是未解析的 ${ENV_VAR} 占位符。
+
+    core/config.py 在环境变量缺失时保留原占位符（不在加载期抛异常）。
+    但装配连接器时，这类占位符等于"用户忘了填 .env"，应视为缺失。
+    """
+    if not isinstance(value, str):
+        return False
+    return bool(_ENV_PLACEHOLDER.fullmatch(value.strip()))
+
+
+def missing_required(cfg: dict, keys: list[str]) -> list[str]:
+    """返回 cfg 中缺失（空值 或 未解析占位符）的 key 列表。"""
+    missing: list[str] = []
+    for key in keys:
+        value = cfg.get(key)
+        if value is None or value == "" or is_unresolved_placeholder(value):
+            missing.append(key)
+    return missing

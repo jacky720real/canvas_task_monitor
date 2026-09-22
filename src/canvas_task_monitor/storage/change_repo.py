@@ -19,12 +19,18 @@ class ChangeRepo:
     def __init__(self, db: Database) -> None:
         self.db = db
 
-    def record_many(self, changes: list[ChangeRecord]) -> None:
+    def record_many(
+        self,
+        changes: list[ChangeRecord],
+        processed: bool = True,
+    ) -> None:
         """批量写入变更日志。
 
-        processed 恒写 1：本方法只在 LLM 流程成功走完后由 Poller 调用。
-        将来若要区分"LLM 失败 vs 全部噪声"，会在 Phase 5 改 extractor 返回值，
-        届时加 processed 参数（boolean 语义 = LLM 是否成功走完流程）。
+        processed 语义（**由 Poller 传入 llm_ok**）：
+        - True  → LLM 成功走完流程（产出 0 条任务也算成功，那是"全是噪声"）
+        - False → LLM 调用失败 / schema 校验失败 / 部分批次失败
+
+        之前 Phase 2 里 processed 恒写 1 是临时方案，现由调用者控制。
         """
         detected_at = utc_now_iso()
         rows = [
@@ -34,7 +40,7 @@ class ChangeRepo:
                 change.change_type,
                 json.dumps(change.diff, ensure_ascii=False, sort_keys=True, default=str),
                 detected_at,
-                1,
+                int(processed),
             )
             for change in changes
         ]
