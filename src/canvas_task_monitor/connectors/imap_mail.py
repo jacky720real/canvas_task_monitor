@@ -44,6 +44,7 @@ SOURCE = "mail"
 _IMAP_DATE_FORMAT = "%d-%b-%Y"  # IMAP SINCE 的格式：02-Jan-2026（月份是英文缩写）
 _SSL_TIMEOUT_SECONDS = 30.0
 _BODY_PREVIEW_CHARS = 500
+_MAX_DATE_CHARS = 200  # 畸形日期保留原文时的截断上限
 _TAG_PATTERN = re.compile(r"<[^>]+>")
 
 
@@ -117,7 +118,7 @@ class ImapMailConnector(BaseConnector):
             source=SOURCE,
             external_id=external_id,
             course_id=None,
-            data={
+            payload={
                 "subject": _decode_header_value(message.get("Subject")),
                 "from": _decode_header_value(message.get("From")),
                 "receivedDateTime": _normalize_date(message.get("Date")),
@@ -162,18 +163,26 @@ def _decode_bytes(raw: bytes, charset: str | None) -> str:
 
 
 def _normalize_date(raw: str | None) -> str | None:
-    """把 RFC 2822 的 Date 头转成 ISO 8601。
+    """把 RFC 2822 的 Date 头转成 ISO 8601（三态）。
 
-    缺失或解析失败一律返回 None —— 既不抛异常也不丢弃整封邮件，
-    宁可让下游看到 null，也不要漏掉一封通知。
+    - 能解析        → ISO 8601 字符串
+    - 有值但解析失败 → 原始字符串（strip 后，超长截断到 200 字符）
+    - 缺失 / 空串    → None
+
+    为什么畸形日期要保留原文而不是一律 None：LLM 看到 "Mon, 32 Sep 2025"
+    能判断这大概是老师手误、也许指 10 月 2 日；看到 None 则完全没有信息可用。
+    判定交给 LLM 比写死在代码里更灵活。
     """
-    if not raw:
+    if raw is None:
+        return None
+    text = raw.strip()
+    if not text:
         return None
     try:
-        parsed = parsedate_to_datetime(raw)
+        parsed = parsedate_to_datetime(text)
     except (TypeError, ValueError):
-        logger.debug("Date 头解析失败，置为 null：%r", raw)
-        return None
+        logger.debug("Date 头解析失败，保留原文：%r", text)
+        return text[:_MAX_DATE_CHARS]
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.isoformat()

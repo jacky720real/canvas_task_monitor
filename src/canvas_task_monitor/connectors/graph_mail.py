@@ -47,6 +47,7 @@ _SCOPE = "https://graph.microsoft.com/.default"
 _SELECT_FIELDS = "subject,from,receivedDateTime,bodyPreview,internetMessageId"
 _TOKEN_EXPIRY_SKEW = 60.0  # 提前 60 秒视为过期，避免用到临界令牌
 _PAGE_TOP = 50
+_MAX_DATE_CHARS = 200  # 异常时间字段保留原文时的截断上限
 
 
 class GraphMailConnector(BaseConnector):
@@ -221,12 +222,12 @@ class GraphMailConnector(BaseConnector):
             source=SOURCE,
             external_id=external_id,
             course_id=None,
-            data={
+            payload={
                 "subject": message.get("subject") or "",
                 "from": address,
-                # 时间字段缺失时填 None（不是空串、更不 skip）：宁可让下游看到 null，
-                # 也不要因为一个字段异常就漏掉整封通知。
-                "receivedDateTime": message.get("receivedDateTime") or None,
+                # 三态：有值原样保留、空串/缺失 → None。
+                # 保留异常原文是为了给 LLM 留判断线索（不是空串这种无信息的值）。
+                "receivedDateTime": _clean_optional_str(message.get("receivedDateTime")),
                 "bodyPreview": message.get("bodyPreview") or "",
             },
         )
@@ -240,6 +241,14 @@ class GraphMailConnector(BaseConnector):
             lowered.endswith((f"@{domain}", f".{domain}"))
             for domain in (item.lower() for item in self.filter_from_domains)
         )
+
+
+def _clean_optional_str(value: Any) -> str | None:
+    """三态字符串：有值 → strip 后原样保留（截断 200 字符）；空串 / 缺失 → None。"""
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text[:_MAX_DATE_CHARS] if text else None
 
 
 def _retry_after_seconds(response: httpx.Response) -> float | None:

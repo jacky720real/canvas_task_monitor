@@ -42,23 +42,21 @@ class CanvasConnector(BaseConnector):
 
     name = "canvas"
 
-    def __init__(
-        self,
-        base_url: str,
-        token: str,
-        timeout: float = 20.0,
-        rate_limit_rps: float = 3.0,
-        max_attempts: int = 3,
-        backoff_base: float = 1.5,
-        lookback_days: int = 30,
-    ) -> None:
-        super().__init__(rate_limit_rps=rate_limit_rps)
-        self.base_url = base_url.rstrip("/")
-        self.token = token
-        self.timeout = float(timeout)
-        self.max_attempts = max(int(max_attempts), 1)
-        self.backoff_base = float(backoff_base)
-        self.lookback_days = int(lookback_days)
+    def __init__(self, cfg: dict[str, Any]) -> None:
+        """按 settings.yaml 的 canvas 段构造。
+
+        传整段配置（而不是一长串位置参数）的理由：以后加字段只改 settings.yaml，
+        连接器侧用 .get(..., 默认值) 兜底，不必再去改调用方与构造函数签名。
+        与 graph_mail.py / imap_mail.py 保持同一风格。
+        """
+        super().__init__(rate_limit_rps=float(cfg.get("rate_limit_rps", 3)))
+        self.base_url = str(cfg.get("base_url", "")).rstrip("/")
+        self.token = str(cfg.get("token", ""))
+        self.timeout = float(cfg.get("timeout", 20))
+        self.lookback_days = int(cfg.get("lookback_days", 30))
+        retry = cfg.get("retry") or {}
+        self.max_attempts = max(int(retry.get("max_attempts", 3)), 1)
+        self.backoff_base = float(retry.get("backoff_base", 1.5))
         self._client: httpx.AsyncClient | None = None
 
     async def aclose(self) -> None:
@@ -117,7 +115,7 @@ class CanvasConnector(BaseConnector):
                     source=SOURCE_ASSIGNMENT,
                     external_id=f"course:{course_id}:assignment:{assignment_id}",
                     course_id=str(course_id),
-                    data={
+                    payload={
                         "name": assignment.get("name") or "",
                         "description": assignment.get("description") or "",
                         "due_at": assignment.get("due_at"),
@@ -147,7 +145,7 @@ class CanvasConnector(BaseConnector):
                     source=SOURCE_ANNOUNCEMENT,
                     external_id=f"course:{course_id}:announcement:{announcement_id}",
                     course_id=str(course_id),
-                    data={
+                    payload={
                         "title": announcement.get("title") or "",
                         "message": announcement.get("message") or "",
                         "posted_at": announcement.get("posted_at"),
