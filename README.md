@@ -109,6 +109,9 @@ pip install -e ".[dsh]"     # 安装 DSH 依赖后
 python dsh_plugin.py
 ```
 
+> **注意**：`pip install -e ".[all]"` 会因为 DSH SDK 占位包名而失败。
+> 当前请用 `pip install -e ".[mcp,dev]"`，等 DSH 文档到位后再装 `.[dsh]`。
+
 ### 邮箱接入决策树
 
 优先级顺序：
@@ -138,12 +141,167 @@ ruff check .
 核心架构约束由 `tests/test_import_isolation.py` 自动守护：业务层一旦出现
 `mcp` / `dsh` / `deepseek` / `click` / `argparse` 的 import，测试立即失败。
 
-## 文档
+## 架构决策说明
 
-以下章节将在后续阶段补全：
+### 1. 为什么 `status` 不被 upsert 覆盖
 
-- 架构决策说明（为什么 status 不被 upsert 覆盖、为什么先 LLM 成功再写快照等）
-- 抗宿主破坏性更新
-- 双形态并行验证命令
+`tasks.status`（pending / done）是**用户勾选出来的**本地状态，代表人的意志；而
+`TaskRepo.upsert()` 的写入源是"LLM 抽取结果 + 自动轮询"。若 `SET` 子句包含 `status`，
+用户刚勾选完成的任务会在下一轮轮询后被打回 pending。
 
-（邮箱接入决策树见上文「快速开始 → 邮箱接入决策树」。）
+因此 SQL 的 `SET` 子句刻意排除 `status`（见 `storage/task_repo.py` 内的注释），
+唯一能改状态的入口是 `set_status()`，只由用户显式操作触发。
+回归用例：`tests/test_task_repo.py::test_upsert_does_not_overwrite_user_status`。
+
+### 2. 为什么先 LLM 成功再写快照
+
+`Poller.poll_once()` 的顺序是：拉数据 → 检测变更 → 调 LLM → **LLM 成功后**才写快照。
+若先写快照再调 LLM，一旦 LLM 失败，下一轮检测会认为"这批变更已处理过"而跳过，
+**任务就永久丢失了**。现在的顺序保证：`llm_ok=False` 时本轮不写快照、不写任务，
+下轮会重新检测到同一批变更并重试（`change_log` 仍留痕，`processed=0`）。
+
+### 3. 为什么用字段白名单算 hash 而不是全量 payload
+
+Canvas 返回体里的 `updated_at` / `html_url` 这类字段几乎每次请求都在变。
+若对全量 payload 算 hash，每轮都会"误报变更"，进而每轮都调用 LLM —— token 直接烧光。
+
+所以 `core/hashing.py` 为每个 source 维护一份**字段白名单**（如 `canvas_assignment`
+只取 name / description / due_at / points_possible / submission_types），只对白名单内的
+字段算 sha256。这样"内容真的变了"才触发变更。
+
+### 4. 为什么无变更不调 LLM
+
+`detect_changes()` 返回空列表时，`Poller` 直接 `continue`，`TaskExtractor.extract([])`
+也会**立即返回 `([], True)` 且不发出任何 LLM 请求**。轮询是每 10 分钟一次的常态动作，
+绝大多数轮次其实什么都没变；省 token 的关键就在这条分支上。
+
+### 5. 为什么 score 由代码计算而不交给 LLM
+
+- **LLM 算术不稳定**，5×10 + 3×8 这种式子它可能算错；
+- **公式需要可调**：权重放在 `settings.yaml` 的 `ai.score_weights`，改配置即改分；
+- `score` 本质是**确定性派生字段**，不是 AI 判断。
+
+所以 `output_schema` 里**没有** `score`，`system_prompt` 明确禁止输出它；
+extractor 在 schema 校验前会剥掉模型违规输出的 `score`（定向清理，其它多余字段仍被严格拒绝），
+再用 `compute_score()` 重算并 clamp 到 0~100。
+
+### 6. 为什么 Container 的配置预检在 Database 之前
+
+`Container.__init__` 的第 3 步是 `_validate_all_config()`（零副作用），第 4 步才建库。
+早期版本把校验放在建连接器那一步，结果是"缺配置"时报错前**已经创建了一个空的
+`data/tasks.db`** —— 用户只是想看报错，却发现自己多了一个库，很诡异。
+
+现在预检先于一切副作用执行：`校验`与`构造`分离（`_validate_all_config` 只校验、
+`_build_connectors` 只构造）。回归用例：
+`tests/test_config_validation.py::test_validation_is_side_effect_free`。
+
+### 7. 为什么用 `find_spec` 而非 `import` 探测 DSH SDK
+
+`dsh_plugin.py` 需要知道"DSH SDK 在不在"，但**不应该真的 import 它**：
+插件框架常在模块顶层注册 handler、起后台线程、读环境变量，
+在"探测"阶段执行这些代码会产生难以排查的副作用。
+`importlib.util.find_spec("dsh")` 只查 import 系统、不执行模块。
+
+真正的 SDK 调用等 DSH 文档到位后，写在专门的 `_register_with_dsh()` 里。
+
+## 抗宿主破坏性更新
+
+### 三层解耦
+
+```
+   ┌────────────────────────────────────────────────┐
+   │  适配层 (可随时替换，宿主破坏性更新只改这层)     │
+   │  cli_main.py  mcp_server.py  dsh_plugin.py     │
+   └───────────────────┬────────────────────────────┘
+                       │ 只调用 ↓
+   ┌───────────────────▼────────────────────────────┐
+   │  契约层 contracts/plugin.py                     │
+   │  PluginFacade Protocol + PLUGIN_API_VERSION     │
+   └───────────────────┬────────────────────────────┘
+                       │ 由 ↓ 实现
+   ┌───────────────────▼────────────────────────────┐
+   │  业务层 services/ (Poller, Facade)              │
+   │  ★ 禁止 import mcp / dsh / argparse / click ★   │
+   └───────────────────┬────────────────────────────┘
+                       │
+   ┌───────────────────▼────────────────────────────┐
+   │  领域层 core / storage / connectors / ai / diff │
+   └────────────────────────────────────────────────┘
+```
+
+这条约束由 `tests/test_import_isolation.py` 自动守护：只要它绿，宿主换版本就不会波及业务层。
+
+### 实战案例：mcp 2.x 破坏性更新
+
+#### 事件
+
+mcp SDK 从 1.x 升级到 2.x 时，将 `FastMCP` 类改名为 `MCPServer`，
+`mcp.server.fastmcp` 模块被移除。迁移指南：
+https://py.sdk.modelcontextprotocol.io/v2/migration/#fastmcp-renamed-to-mcpserver
+
+#### 本项目的影响范围
+
+- 业务层 (`src/canvas_task_monitor/`)：**0 行改动**
+- 适配层 (`mcp_server.py`)：**6 行改动**（新增 try/except 嵌套 import shim）
+- 测试：**既有冒烟全绿**，无需修改
+
+#### 为什么能做到
+
+1. 业务逻辑全部在 `services/facade.py` 及以下，不感知 mcp 存在
+2. `mcp_server.py` 是薄包装——每个 tool 函数体 ≤ 3 行
+3. 契约层 `contracts/plugin.py` 定义了宿主无关的 Protocol
+
+#### 教训
+
+选宿主 SDK 时优先选"薄适配层"架构：把宿主 SDK 的所有 import 集中在入口文件顶部，
+用 try/except 包裹；**不要在业务代码里 import 任何宿主**。
+
+### 升级 DSH（或 MCP）时的操作清单
+
+1. 只改对应的入口文件 —— `dsh_plugin.py`（或 `mcp_server.py`）
+2. 若宿主契约本身变了（不是 SDK 包名/类名，而是调用语义）：
+   先 bump `contracts/plugin.py` 的 `PLUGIN_API_VERSION`，再逐个适配三个入口
+3. 跑 `pytest`（尤其 `tests/test_import_isolation.py`）确认业务层没被污染
+4. 用 `python dsh_plugin.py` / `python mcp_server.py` 自检块做一次人工 sanity check
+
+### 判断"是否需要动业务层"的口诀
+
+| 变化类型 | 改哪里 |
+| --- | --- |
+| 只是「换个方式调用已有能力」 | 入口文件 |
+| 「多了一个业务动作」 | `services/` + `contracts/`，入口跟着加一行路由 |
+| 「数据源 / 算法变了」 | 对应领域层（connectors / diff / ai） |
+| **适配宿主** | **永远不该动业务层** |
+
+## 双形态并行验证命令
+
+```bash
+# 独立形态（只需核心依赖）
+pip install -e .
+python cli_main.py --version
+python cli_main.py list
+
+# MCP 形态
+pip install -e ".[mcp]"
+python mcp_server.py
+
+# DSH 形态（缺 SDK 时走自检块）
+python dsh_plugin.py
+
+# 全部测试
+pip install -e ".[dev]"
+pytest
+ruff check .
+```
+
+## 首次启动 checklist
+
+- [ ] 复制 `.env.example` 为 `.env`
+- [ ] 填 Canvas 配置：`CANVAS_BASE_URL`、`CANVAS_TOKEN`
+- [ ] 填邮箱配置（**优先 IMAP**）：`IMAP_HOST`、`IMAP_USER`、`IMAP_PASSWORD`
+- [ ] 填 LLM 配置：`LLM_BASE_URL`、`LLM_API_KEY`、`LLM_MODEL`
+- [ ] `pip install -e ".[dev]"`
+- [ ] `python cli_main.py --version` 输出正常
+- [ ] `python cli_main.py poll` 跑一次（首次会拉全量，可能慢）
+- [ ] `python cli_main.py list` 看任务
+- [ ] 可选：`python cli_main.py watch` 后台跑

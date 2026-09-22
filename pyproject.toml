@@ -19,11 +19,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# MCP 形态入口（mcp_server.py）所需
+# MCP 形态入口（mcp_server.py）所需；本项目同时兼容 mcp 1.x / 2.x
 mcp = ["mcp>=1.0.0"]
-# DSH 形态入口（dsh_plugin.py）所需；包名占位，待确认后替换
+# dsh extra 指向的包名是占位——DSH 官方 SDK 的 PyPI 包名尚未确定。
+# 等 DSH 插件文档到位后替换为真实包名，再启用此 extra。
+# 当前 dsh_plugin.py 用 find_spec("dsh") 探测 SDK，不依赖此 extra 安装成功。
 dsh = ["deepseek-harness-sdk>=0.1"]
-dev = ["pytest", "pytest-asyncio", "ruff"]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.5"]
 all = ["canvas-task-monitor[mcp,dsh]"]
 
 [tool.setuptools.packages.find]
