@@ -1,0 +1,91 @@
+version: 1
+name: task_extract
+description: 从 Canvas / 邮件变更片段中抽取结构化任务，归类为作业/活动/额外提醒。
+
+system_prompt: |
+  你是一个结构化的任务抽取引擎。
+  你的唯一职责：把用户提供的"变更素材"映射到固定 JSON Schema。
+  硬性规则（违反即视为失败）：
+  1. 只输出一个 JSON 对象，禁止 markdown 代码块、禁止前后说明文字。
+  2. 输出必须严格匹配 output_schema；不得新增、删除、重命名任何字段。
+  3. 不允许编造素材中不存在的信息。字段缺失时：
+     字符串→""，数字→0，时间→null，数组→[]
+  4. 每个素材条目最多产出一条任务；若判定为噪声（广告、垃圾邮件、无行动价值），
+     在 reason 里说明并跳过。
+  5. 只允许从 allow_tags 枚举里选标签，最多 3 个。
+  6. urgency / importance 只允许 0~5 的整数，必须给出 reason 支撑。
+  7. 禁止输出 score 字段。综合分由外部系统根据 urgency 与 importance 计算。
+
+user_prompt_template: |
+  ## 当前时间
+  {{ now_iso }}
+
+  ## 分类定义（严格遵循）
+  - assignment：课程作业、论文、实验报告、项目提交，有明确提交动作
+  - activity：测验、考试、课堂讨论、直播讲座、签到、小组活动
+  - reminder：公告中的规则/政策/纪律/时间变更提醒等无直接提交物的事项
+
+  ## 打分锚点
+  urgency（离截止时间的紧迫度）：
+    0=无截止或30天以后；1=14天内；2=7天内；3=3天内；4=24小时内；5=已逾期或今天截止
+  importance（对成绩/学业的影响权重）：
+    0=纯通知；1=选修/低权重；2=一般作业；3=占比≥10%或期中相关；
+    4=占比≥20%或期末/答辩相关；5=硬性门槛（必须完成才能通过/毕业）
+
+  score 由系统计算，你不需要输出。只负责给 urgency 与 importance 打整数分。
+
+  ## 变更素材（JSON 数组）
+  {{ changes_json }}
+
+  ## 输出
+  仅输出符合 output_schema 的 JSON。
+
+output_schema:
+  type: object
+  additionalProperties: false
+  required: [tasks]
+  properties:
+    tasks:
+      type: array
+      maxItems: 20
+      items:
+        type: object
+        additionalProperties: false
+        required:
+          - source
+          - external_id
+          - category
+          - title
+          - urgency
+          - importance
+          - urgency_reason
+          - importance_reason
+        properties:
+          source:
+            type: string
+            enum: [canvas_assignment, canvas_announcement, mail]
+          external_id: {type: string, maxLength: 128}
+          change_type:
+            type: string
+            enum: [new, updated, removed]
+          category:
+            type: string
+            enum: [assignment, activity, reminder]
+          title: {type: string, minLength: 1, maxLength: 120}
+          summary: {type: string, maxLength: 300}
+          course: {type: string, maxLength: 80}
+          due_at: {type: [string, "null"]}
+          urgency: {type: integer, minimum: 0, maximum: 5}
+          importance: {type: integer, minimum: 0, maximum: 5}
+          tags:
+            type: array
+            maxItems: 3
+            items:
+              type: string
+              enum: [exam, paper, project, quiz, discussion, rule, deadline_change, group, reading, admin]
+          is_rule: {type: boolean}
+          urgency_reason: {type: string, maxLength: 200}
+          importance_reason: {type: string, maxLength: 200}
+
+allow_tags: [exam, paper, project, quiz, discussion, rule, deadline_change, group, reading, admin]
+allowed_categories: [assignment, activity, reminder]
