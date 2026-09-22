@@ -44,16 +44,21 @@ class Container:
         setup_logging(str(self.cfg.get("app.log_level", "INFO")))
         logger.debug("配置已加载：%s", self.cfg.source_path)
 
-        # 3. 存储层
+        # 3. ★ 配置预检（零副作用）：校验所有启用数据源 + LLM 的必需配置。
+        #    必须放在任何创建文件/连接的操作之前 —— 否则"配置错误"会留下
+        #    data/tasks.db 之类的怪异物（用户只是想看报错，却发现自己多了一个库）。
+        self._validate_all_config()
+
+        # 4. 存储层（第一个有副作用的操作）
         self.db = Database(self.cfg.get("app.db_path", DEFAULT_DB_PATH))
         self.snapshots = SnapshotRepo(self.db)
         self.tasks_repo = TaskRepo(self.db)
         self.changes = ChangeRepo(self.db)
 
-        # 4. 业务层
+        # 5. 业务层
         self.task_service = TaskService(self.tasks_repo)
 
-        # 5. AI 层
+        # 6. AI 层
         template_path = self.cfg.get("template_path") or DEFAULT_TEMPLATE_PATH
         template = PromptTemplate.load(template_path)
         self._llm = OpenAICompatClient(self.cfg.get("ai") or {})
@@ -64,10 +69,10 @@ class Container:
             score_weights=self.cfg.get("ai.score_weights", DEFAULT_SCORE_WEIGHTS),
         )
 
-        # 6. 连接器（含延迟 fail-fast 校验）
+        # 7. 连接器（纯构造，校验已在第 3 步完成）
         self.connectors: list[BaseConnector] = self._build_connectors()
 
-        # 7. Poller
+        # 8. Poller
         self.poller = Poller(
             connectors=self.connectors,
             snapshot_repo=self.snapshots,
@@ -78,61 +83,90 @@ class Container:
             jitter=float(self.cfg.get("poll.jitter_seconds", DEFAULT_JITTER_SECONDS)),
         )
 
-        # 8. Facade（业务层唯一对外出口）
+        # 9. Facade（业务层唯一对外出口）
         self.facade = CanvasTaskMonitorFacade(self)
 
         logger.info(
             "Container 装配完成：db=%s sources=%s", self.db.path, [c.name for c in self.connectors]
         )
 
-    def _build_connectors(self) -> list[BaseConnector]:
-        """按 poll.sources 装配连接器。
+    def _validate_all_config(self) -> None:
+        """配置预检：校验所有启用的外部依赖的必需字段。
 
-        只对**启用的**连接器做必需字段校验。未启用的连接器（例如只跑 IMAP 的用户，
-        mail.graph 字段全空）不校验，避免误伤。错误信息必须同时说明"缺哪个字段"
-        和"怎么修"——用户是学生不是运维，容错成本高。
+        失败即抛 RuntimeError，且**不产生任何副作用**（此方法不建库、不建连接）。
+
+        与 _build_connectors() 的分工：
+        - _validate_all_config：只校验，不构造
+        - _build_connectors：只构造，不校验
+
+        只校验**启用**的数据源（未启用的 provider 允许字段为空），
+        错误信息必须同时说明"缺哪个字段"和"怎么修"——用户是学生不是运维。
+        """
+        sources = self.cfg.get("poll.sources") or []
+
+        if "canvas" in sources:
+            missing = missing_required(self.cfg.get("canvas") or {}, ["base_url", "token"])
+            if missing:
+                fields = ", ".join(f"canvas.{key}" for key in missing)
+                raise RuntimeError(
+                    f"Canvas 连接器缺少必需配置：{fields}。"
+                    f" 请检查 .env 或 config/settings.yaml。"
+                )
+
+        if "mail" in sources:
+            provider = self.cfg.get("mail.provider", "graph")
+            if provider == "graph":
+                missing = missing_required(
+                    self.cfg.get("mail.graph") or {},
+                    ["tenant_id", "client_id", "client_secret", "user"],
+                )
+                if missing:
+                    fields = ", ".join(f"mail.graph.{key}" for key in missing)
+                    raise RuntimeError(
+                        f"Graph 邮箱连接器缺少必需配置：{fields}。"
+                        f" 若租户拿不到应用权限，请在 settings.yaml 把 mail.provider 改成 'imap'。"
+                    )
+            elif provider == "imap":
+                missing = missing_required(
+                    self.cfg.get("mail.imap") or {}, ["host", "username", "password"]
+                )
+                if missing:
+                    fields = ", ".join(f"mail.imap.{key}" for key in missing)
+                    raise RuntimeError(
+                        f"IMAP 邮箱连接器缺少必需配置：{fields}。"
+                        f" 请检查 .env 或 config/settings.yaml。"
+                    )
+            else:
+                raise RuntimeError(
+                    f"未知的 mail.provider：{provider!r}。允许值：'graph' | 'imap'。"
+                )
+
+        # LLM 是三个入口都必需的，无条件校验
+        missing_ai = missing_required(self.cfg.get("ai") or {}, ["base_url", "api_key", "model"])
+        if missing_ai:
+            fields = ", ".join(f"ai.{key}" for key in missing_ai)
+            raise RuntimeError(
+                f"AI 缺少必需配置：{fields}。 请检查 .env 或 config/settings.yaml。"
+            )
+
+    def _build_connectors(self) -> list[BaseConnector]:
+        """按 poll.sources 装配连接器（**纯构造，不做校验**）。
+
+        配置合法性由 _validate_all_config() 预先保证，所以这里不再出现
+        任何 raise —— 校验与构造分离，才能让预检先于一切副作用执行。
         """
         out: list[BaseConnector] = []
         sources = self.cfg.get("poll.sources") or []
 
         if "canvas" in sources:
-            canvas_cfg = self.cfg.get("canvas") or {}
-            missing = missing_required(canvas_cfg, ["base_url", "token"])
-            if missing:
-                fields = "、".join(f"canvas.{key}" for key in missing)
-                raise RuntimeError(
-                    f"Canvas 连接器缺少必需配置：{fields}。请检查 .env 或 config/settings.yaml。"
-                )
-            out.append(CanvasConnector(canvas_cfg))
+            out.append(CanvasConnector(self.cfg.get("canvas") or {}))
 
         if "mail" in sources:
             provider = self.cfg.get("mail.provider", "graph")
             if provider == "graph":
-                graph_cfg = self.cfg.get("mail.graph") or {}
-                missing = missing_required(
-                    graph_cfg, ["tenant_id", "client_id", "client_secret", "user"]
-                )
-                if missing:
-                    fields = "、".join(f"mail.graph.{key}" for key in missing)
-                    raise RuntimeError(
-                        f"Graph 邮箱连接器缺少必需配置：{fields}。"
-                        f"若租户拿不到应用权限，请在 settings.yaml 把 mail.provider 改成 'imap'。"
-                    )
-                out.append(GraphMailConnector(graph_cfg))
+                out.append(GraphMailConnector(self.cfg.get("mail.graph") or {}))
             elif provider == "imap":
-                imap_cfg = self.cfg.get("mail.imap") or {}
-                missing = missing_required(imap_cfg, ["host", "username", "password"])
-                if missing:
-                    fields = "、".join(f"mail.imap.{key}" for key in missing)
-                    raise RuntimeError(
-                        f"IMAP 邮箱连接器缺少必需配置：{fields}。"
-                        f"请检查 .env 或 config/settings.yaml。"
-                    )
-                out.append(ImapMailConnector(imap_cfg))
-            else:
-                raise RuntimeError(
-                    f"未知的 mail.provider：{provider!r}。允许值：'graph' | 'imap'。"
-                )
+                out.append(ImapMailConnector(self.cfg.get("mail.imap") or {}))
 
         return out
 
