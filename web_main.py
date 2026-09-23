@@ -106,15 +106,50 @@ class _AppState:
 # HTTP 服务是长驻进程，Container 只装配一次（改配置时由 reload 就地重建）
 _state = _AppState()
 
+# 进程级**共享**事件循环：容器里的 httpx 客户端是惰性创建的，会绑在"创建它的那个 loop"上。
+# 若每个请求都 asyncio.run() 一个新 loop，第一次请求建的连接就绑在一个马上被关掉的 loop 上
+# —— 第二次点"拉取"以及关闭容器时都会撞 RuntimeError: Event loop is closed（真机现象）。
+# 所以整个进程共用一个 loop；http.server 是多线程的，用 _loop_lock 串行化 facade 调用。
+_loop = asyncio.new_event_loop()
+_loop_lock = threading.Lock()
+
+
+def _run(coro: Any) -> Any:
+    """在共享 loop 上跑一个协程并等它结束（并发请求串行执行，单机单人使用足够）。"""
+    with _loop_lock:
+        return _loop.run_until_complete(coro)
+
+
+def _close_loop() -> None:
+    """进程退出前关掉共享 loop（此时容器资源已释放）。"""
+    try:
+        if not _loop.is_closed():
+            _loop.close()
+    except Exception:  # noqa: BLE001, S110 —— loop 可能已半关闭，不影响进程退出
+        pass
+
 
 def _close_container() -> None:
     """关掉旧 Container（改配置重建前必须释放旧的 SQLite 连接）。
 
-    Container.aclose() 内部已对连接器 / LLM / DB 逐个兜底并记日志，这里不必再包 try。
+    【为什么不用 asyncio.run（真机踩过）】
+    容器里的 httpx 客户端绑在**创建它的那个 loop** 上。asyncio.run() 会另起一个 loop
+    并在返回后立即关掉它，而 httpx 的 aclose() 里关 TLS 连接要往"它自己那个 loop"上
+    call_soon → RuntimeError: Event loop is closed（bootstrap 会把"连接器关闭失败"
+    记成一条带堆栈的 WARNING，用户看到的就是那段像崩溃的输出）。
+
+    所以在**同一个共享 loop** 上关闭，并补一次 asyncio.sleep(0) 让挂起的清理回调跑完。
+    关闭期的任何异常都吞掉——不影响进程退出。
     """
     container, _state.container = _state.container, None
-    if container is not None:
-        asyncio.run(container.aclose())
+    if container is None:
+        return
+    try:
+        _run(container.aclose())
+        # 给挂起的异步清理（httpx 关闭 TLS 连接等）一个执行机会
+        _run(asyncio.sleep(0))
+    except Exception:  # noqa: BLE001, S110 —— 关闭期异常不影响进程退出
+        pass
 
 
 def _try_init_container(settings_path: str | Path | None = None) -> bool:
@@ -141,13 +176,13 @@ def _try_init_container(settings_path: str | Path | None = None) -> bool:
 def _invoke(action: str, params: dict[str, Any]) -> dict[str, Any]:
     """调 facade 并原样返回其结果（{"ok": bool, "data"/"error": ...}）。
 
-    http.server 是同步模型，而 facade 是 async —— 用 asyncio.run 过桥。
-    这些端点都不会碰 LLM，因此"每次请求一个新 event loop"没有副作用。
+    http.server 是同步模型，而 facade 是 async —— 用进程级共享 loop 过桥
+    （见 _run 的说明：不能用 asyncio.run，否则 httpx 客户端会绑在死 loop 上）。
     """
     container = _state.container
     if container is None:  # pragma: no cover - 只有装配失败才会走到
         return {"ok": False, "error": "container not initialised"}
-    return asyncio.run(container.facade.invoke(action, params))
+    return _run(container.facade.invoke(action, params))
 
 
 def _first(query: dict[str, list[str]], key: str) -> str | None:
@@ -331,7 +366,7 @@ class WebHandler(BaseHTTPRequestHandler):
             if container is None:  # pragma: no cover - 正常模式下不会是 None
                 self._json({"ok": False, "error": "container not initialised"}, status=500)
                 return
-            result = asyncio.run(container.facade.invoke("poll_now", {}))
+            result = _run(container.facade.invoke("poll_now", {}))
         except Exception as exc:  # noqa: BLE001 —— 异常也要回给页面，不能让它变成空响应
             self._json({"ok": False, "error": f"拉取失败：{exc}"}, status=500)
             return
@@ -489,6 +524,7 @@ def main() -> int:
     finally:
         server.server_close()
         _close_container()
+        _close_loop()
     return EXIT_OK
 
 
