@@ -294,6 +294,23 @@ pytest
 ruff check .
 ```
 
+## Web UI（可选）
+
+```bash
+python web_main.py                  # 自动打开浏览器 http://127.0.0.1:8765
+python web_main.py --port 9000      # 指定端口
+python web_main.py --no-browser     # 不自动打开浏览器
+```
+
+零第三方依赖（标准库 `http.server` + 单文件 `web_ui/index.html`）。
+它和 `cli_main.py` 一样是**薄适配层**：4 个端点全部转发给 `container.facade.invoke`，
+不写任何业务逻辑。**刻意不提供 `/api/poll`** —— 轮询会真实调用外部 API 并消耗
+LLM token，不该是一个能一键触发的动作（要轮询请用 `cli_main.py poll` / `watch`）。
+
+> **开发期调用说明**：`pip install -e .` 后 `ctm` / `ctm-web` 命令不可用（setuptools
+> editable 安装对根级入口文件的已知限制）。请用 `python cli_main.py ...` /
+> `python web_main.py ...`。非 editable 安装时 console script 正常生效。
+
 ## 首次启动 checklist
 
 - [ ] 复制 `.env.example` 为 `.env`

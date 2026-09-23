@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>任务清单 · canvas_task_monitor</title>
+<style>
+  :root {
+    --bg: #FAF9F6;
+    --card: #FFFFFF;
+    --ink: #2A2A28;
+    --muted: #6E6A63;
+    --line: #EDEAE3;
+    --green: #4C8C5A;
+    --gold: #C79A3A;
+    --slate: #7A8699;
+    --danger: #B4462F;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-size: 15px;
+    line-height: 1.5;
+  }
+  header {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
+    padding: 16px 20px 12px;
+    background: var(--bg);
+    border-bottom: 1px solid var(--line);
+  }
+  h1 { margin: 0 8px 0 0; font-size: 20px; font-weight: 600; }
+  .filters { display: flex; gap: 8px; flex-wrap: wrap; }
+  .chip {
+    padding: 6px 12px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--card);
+    color: var(--muted);
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .chip.active { background: var(--ink); border-color: var(--ink); color: #fff; }
+  .refresh {
+    margin-left: auto;
+    padding: 6px 12px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--card);
+    color: var(--muted);
+    font-size: 13px;
+    cursor: pointer;
+  }
+  main {
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .card {
+    display: flex;
+    gap: 12px;
+    padding: 16px;
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-left: 4px solid var(--line);
+    border-radius: 10px;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+    cursor: pointer;
+  }
+  .card:hover { box-shadow: 0 2px 8px rgba(0, 0, 0, 0.07); }
+  .card.cat-assignment { border-left-color: var(--green); }
+  .card.cat-activity { border-left-color: var(--gold); }
+  .card.cat-reminder { border-left-color: var(--slate); }
+  .card.done { opacity: 0.55; }
+  .card.done .title { text-decoration: line-through; }
+  .check {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    min-width: 22px;
+    padding: 0;
+    border: 2px solid #CFC9BE;
+    border-radius: 50%;
+    background: #fff;
+    color: #fff;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .card.done .check { background: var(--green); border-color: var(--green); }
+  .body { flex: 1; min-width: 0; }
+  .row { display: flex; align-items: baseline; gap: 8px; }
+  .title { margin: 0; font-size: 16px; font-weight: 600; }
+  .score {
+    margin-left: auto;
+    color: var(--green);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+  .meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 12px;
+    margin-top: 8px;
+    color: var(--muted);
+    font-size: 13px;
+  }
+  .tag { padding: 0 6px; border-radius: 6px; background: #F3F1EC; }
+  .detail { display: none; margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--line); color: var(--muted); font-size: 13px; }
+  .card.open .detail { display: block; }
+  .detail p { margin: 0 0 4px; }
+  .state {
+    padding: 48px 16px;
+    border: 1px dashed var(--line);
+    border-radius: 10px;
+    background: var(--card);
+    color: var(--muted);
+    text-align: center;
+  }
+  .state.error { color: var(--danger); border-color: #E7C9C1; }
+</style>
+</head>
+<body>
+<header>
+  <h1>任务清单</h1>
+  <div class="filters" id="filters">
+    <button class="chip active" data-category="">全部</button>
+    <button class="chip" data-category="assignment">作业</button>
+    <button class="chip" data-category="activity">活动</button>
+    <button class="chip" data-category="reminder">提醒</button>
+  </div>
+  <button class="refresh" id="refresh">刷新</button>
+</header>
+<main id="app"></main>
+<script>
+const CATEGORY_LABEL = { assignment: "作业", activity: "活动", reminder: "提醒" };
+const state = { category: "", tasks: [], loading: true, error: null };
+
+const app = document.getElementById("app");
+
+/** 转义所有用户内容（防 XSS）。 */
+function esc(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (ch) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]
+  ));
+}
+
+/** 字段缺失时的降级显示。 */
+function dash(value) {
+  return value === null || value === undefined || value === "" ? "—" : String(value);
+}
+
+/** 截止时间截断到分钟并把 T 换成空格。 */
+function timeText(value) {
+  return value ? String(value).slice(0, 16).replace("T", " ") : "—";
+}
+
+function stateHTML(kind, text) {
+  return `<div class="state ${kind}">${esc(text)}</div>`;
+}
+
+/** 单张任务卡片（函数模板，不做字符串拼接）。 */
+function cardHTML(t) {
+  const done = t.status === "done";
+  return `
+  <article class="card cat-${esc(t.category)}${done ? " done" : ""}" data-id="${esc(t.id)}">
+    <button class="check" data-action="toggle" data-id="${esc(t.id)}" data-done="${done}"
+            title="${done ? "标记为未完成" : "标记为完成"}">${done ? "✓" : ""}</button>
+    <div class="body">
+      <div class="row">
+        <h2 class="title">${esc(t.title)}</h2>
+        <span class="score">${esc(t.score)}</span>
+      </div>
+      <div class="meta">
+        <span class="tag">${esc(CATEGORY_LABEL[t.category] || dash(t.category))}</span>
+        <span>${esc(dash(t.course))}</span>
+        <span>截止 ${esc(timeText(t.due_at))}</span>
+        <span>紧迫/重要 ${esc(t.urgency)}/${esc(t.importance)}</span>
+      </div>
+      <div class="detail">
+        <p>${esc(dash(t.summary))}</p>
+        <p>紧迫理由：${esc(dash(t.urgency_reason))}</p>
+        <p>重要理由：${esc(dash(t.importance_reason))}</p>
+      </div>
+    </div>
+  </article>`;
+}
+
+function listHTML(tasks) {
+  return tasks.map(cardHTML).join("");
+}
+
+/** 渲染三态：加载中 / 失败 / 空 / 列表。 */
+function render() {
+  if (state.loading) {
+    app.innerHTML = stateHTML("", "加载中…");
+  } else if (state.error) {
+    app.innerHTML = stateHTML("error", `加载失败：${state.error}`);
+  } else if (state.tasks.length === 0) {
+    app.innerHTML = stateHTML("", "还没有任务。先跑一次 `python cli_main.py poll` 吧。");
+  } else {
+    app.innerHTML = listHTML(state.tasks);
+  }
+}
+
+async function load() {
+  state.loading = true;
+  state.error = null;
+  render();
+  const params = new URLSearchParams();
+  if (state.category) params.set("category", state.category);
+  params.set("limit", "200");
+  try {
+    const response = await fetch(`/api/tasks?${params.toString()}`);
+    const payload = await response.json();
+    if (!payload.ok) throw new Error(payload.error || "未知错误");
+    state.tasks = payload.data || [];
+  } catch (error) {
+    state.error = error.message;
+    state.tasks = [];
+  } finally {
+    state.loading = false;
+    render();
+  }
+}
+
+async function toggle(taskId, done) {
+  const action = done ? "undone" : "done";
+  try {
+    const response = await fetch(`/api/tasks/${taskId}/${action}`, { method: "POST" });
+    const payload = await response.json();
+    if (!payload.ok) throw new Error(payload.error || "未知错误");
+  } catch (error) {
+    state.error = error.message;
+  }
+  await load();
+}
+
+document.getElementById("filters").addEventListener("click", (event) => {
+  const chip = event.target.closest(".chip");
+  if (!chip) return;
+  state.category = chip.dataset.category || "";
+  document.querySelectorAll(".chip").forEach((node) => node.classList.toggle("active", node === chip));
+  load();
+});
+
+document.getElementById("refresh").addEventListener("click", load);
+
+app.addEventListener("click", (event) => {
+  const check = event.target.closest("[data-action='toggle']");
+  if (check) {
+    event.stopPropagation();
+    toggle(check.dataset.id, check.dataset.done === "true");
+    return;
+  }
+  const card = event.target.closest(".card");
+  if (card) card.classList.toggle("open");
+});
+
+load();
+
+</script>
+</body>
+</html>

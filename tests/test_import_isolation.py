@@ -70,9 +70,77 @@ def test_package_has_no_src_prefix_imports() -> None:
     assert not offenders, f"发现 src. 前缀反模式：{offenders}"
 
 
+ENTRY_FILES = ("cli_main.py", "mcp_server.py", "dsh_plugin.py", "web_main.py")
+
+# web_main.py 允许 import 的模块白名单（规格：零新依赖，只用标准库 + Container）
+WEB_ENTRY_ALLOWED_MODULES = {
+    "__future__",
+    "argparse",
+    "asyncio",
+    "http.server",
+    "json",
+    "pathlib",
+    "sys",
+    "typing",
+    "urllib.parse",
+    "webbrowser",
+    "canvas_task_monitor.services.bootstrap",
+}
+
+BUSINESS_SYMBOLS = {
+    "TaskService",
+    "TaskRepo",
+    "TaskExtractor",
+    "SnapshotRepo",
+    "ChangeRepo",
+    "Database",
+    "TaskItem",
+    "RawItem",
+    "ChangeRecord",
+    "CanvasConnector",
+    "GraphMailConnector",
+    "ImapMailConnector",
+    "Poller",
+    "detect_changes",
+    "canonical_hash",
+    "AppConfig",
+    "PromptTemplate",
+    "OpenAICompatClient",
+    "task_row_to_dict",
+}
+
+
 def test_entry_files_exist_at_project_root() -> None:
-    """三个入口文件都必须在项目根（适配层唯一允许感知宿主的地方）。"""
+    """四个入口文件都必须在项目根（适配层唯一允许感知宿主的地方）。"""
     root = PACKAGE_ROOT.parents[1]
 
-    for name in ("cli_main.py", "mcp_server.py", "dsh_plugin.py"):
+    for name in ENTRY_FILES:
         assert (root / name).is_file(), f"缺少入口文件：{name}"
+
+
+def test_web_entry_is_thin_adapter() -> None:
+    """web_main.py 只准 import 白名单模块，且一律通过 facade.invoke 调业务能力。"""
+    path = PACKAGE_ROOT.parents[1] / "web_main.py"
+    source = path.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    modules = {module for _, module in _iter_imports(tree)}
+    extra = sorted(modules - WEB_ENTRY_ALLOWED_MODULES)
+    assert not extra, f"web_main.py 出现白名单外的 import：{extra}"
+
+    imported: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                imported.add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                imported.add(alias.asname or alias.name)
+
+    violations = sorted(imported & BUSINESS_SYMBOLS)
+    assert not violations, f"web_main.py 依赖了业务/领域符号：{violations}"
+
+    # 三个业务动作都必须过 facade（list_tasks / get_task / mark_task）
+    assert source.count("facade.invoke(") >= 3
+    # 刻意不暴露轮询端点（会烧 token）
+    assert 'parsed.path == "/api/poll"' not in source

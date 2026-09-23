@@ -31,6 +31,21 @@ all = ["canvas-task-monitor[mcp,dsh]"]
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[project.scripts]
+ctm = "cli_main:main"
+ctm-web = "web_main:main"
+# ⚠️ src-layout + editable 安装（pip install -e .）下，这两个 console script 不可用：
+#    根级 py-modules 不会被 editable finder 映射，`ctm` 会报 ModuleNotFoundError。
+#    这是 setuptools 的已知边界，非本项目 bug。
+#
+#    开发期请用路径调用：python cli_main.py ... / python web_main.py ...
+#    非 editable 安装（pip install .）时 scripts 正常生效。
+#
+#    未来若要 editable 下也能用，可选：
+#      (A) 入口文件移入 src/canvas_task_monitor/（破坏"适配层在根"的架构约定）
+#      (B) 放弃 src-layout（连累 Phase 1 的目录约定）
+#    当前选择保持架构约束优先。
+
 [tool.ruff]
 line-length = 100
 target-version = "py310"
