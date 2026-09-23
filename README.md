@@ -95,6 +95,7 @@ python web_main.py
 ```
 浏览器会自动打开。**首次使用**会看到配置向导，跟着走完即可；
 **之后**直接看到任务列表。
+（Windows 用户也可以直接**双击项目根目录的 `启动.bat`**，等价于上面这条命令。）
 
 **3. 日常使用**
 ```bash
@@ -323,8 +324,9 @@ python web_main.py --no-browser     # 不自动打开浏览器
 零第三方依赖（标准库 `http.server` + 两个单文件页 `web_ui/index.html` / `web_ui/setup.html`）。
 它和 `cli_main.py` 一样是**薄适配层**：4 个业务端点全部转发给 `container.facade.invoke`，
 配置向导端点全部转发给根级模块 `setup_config.py`，不写任何业务逻辑。
-**刻意不提供 `/api/poll`** —— 轮询会真实调用外部 API 并消耗 LLM token，
-不该是一个能一键触发的动作（要轮询请用 `cli_main.py poll` / `watch`）。
+**`POST /api/poll`（页面上的「🔄 拉取」按钮）** 会真实调用外部 API 并消耗 LLM token，
+所以带并发锁：同时点第二次直接返回 409，不会重复烧 token、也不会重复调 LLM。
+不想开网页也能拉：`cli_main.py poll` / `watch` 是等价功能。
 
 ### 配置向导（首次启动免手改配置）
 

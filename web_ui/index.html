@@ -59,6 +59,7 @@
     font-size: 13px;
     cursor: pointer;
   }
+  .refresh:disabled { opacity: 0.6; cursor: default; }
   main {
     max-width: 760px;
     margin: 0 auto;
@@ -153,6 +154,7 @@
     <button class="chip" data-category="activity">活动</button>
     <button class="chip" data-category="reminder">提醒</button>
   </div>
+  <button class="refresh" id="pull" title="从 Canvas 拉取最新任务">🔄 拉取</button>
   <button class="refresh" id="refresh">刷新</button>
   <button class="refresh" id="settings" title="回到配置向导">⚙️ 设置</button>
 </header>
@@ -306,6 +308,32 @@ async function loadBanner() {
 
 loadBanner();
 load();
+
+/** 顶部"拉取"按钮：触发一次真实 poll（可能 30-60 秒，期间禁用按钮）。 */
+document.getElementById("pull").addEventListener("click", async () => {
+  const btn = document.getElementById("pull");
+  if (btn.disabled) return;
+  btn.disabled = true;
+  const original = btn.textContent;
+  btn.textContent = "拉取中（可能 1 分钟）…";
+  try {
+    const response = await fetch("/api/poll", { method: "POST" });
+    const payload = await response.json();
+    if (!payload.ok) {
+      alert("拉取失败：" + (payload.error || "未知错误"));
+    } else {
+      const s = payload.data;
+      alert(`拉取完成：\n来源 ${s.sources}，变更 ${s.changes}，任务 ${s.tasks}，LLM 调用 ${s.llm_calls}`);
+      await load();
+      await loadBanner();
+    }
+  } catch (error) {
+    alert("请求失败：" + error.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = original;
+  }
+});
 
 </script>
 </body>

@@ -1,11 +1,12 @@
 """本文件是 Web UI 适配器（标准库 http.server，零第三方依赖）。业务逻辑一律在 services/ 里。
 
 【职责】
-- 把 canvas_task_monitor 的能力暴露为 4 个本地 REST 端点。
+- 把 canvas_task_monitor 的能力暴露为 5 个本地 REST 端点。
 - 只做三件事：路由、把 query 解析成 params、把 facade.invoke 的结果原样透传。
 - 所有业务动作都通过 container.facade.invoke(action, params) 完成。
-- 刻意**不暴露** /api/poll：轮询会真实调用外部 API 并消耗 LLM token，
-  不该是一个能在浏览器里一键触发的动作（要轮询请用 `cli_main.py poll` / `watch`）。
+- /api/poll 会真实调用外部 API 并消耗 LLM token（用户明确要求把它做成页面按钮），
+  因此用 _state.poll_lock 防并发：第二个请求直接 409，避免重复烧 token。
+  命令行等价功能仍是 `cli_main.py poll` / `watch`。
 - 配置向导（/setup + /api/setup/*）只做"解析 JSON → 调 setup_config → 返回 JSON"，
   配置的读写与连通性测试全部在根级模块 setup_config.py 里。
 
@@ -30,6 +31,7 @@ TaskService / TaskRepo / Poller / TaskExtractor / 任何 connector /
   GET  /api/tasks?category=&status=&limit=  → facade.invoke("list_tasks", {...})
   GET  /api/tasks/{id}                      → facade.invoke("get_task", {...})
   POST /api/tasks/{id}/done | /undone       → facade.invoke("mark_task", {...})
+  POST /api/poll                            → facade.invoke("poll_now", {...})（带并发锁）
   POST /api/setup/test-canvas               → setup_config.test_canvas(...)
   POST /api/setup/test-ai                   → setup_config.test_ai(...)
   POST /api/setup/save                      → setup_config.save_config(...)
@@ -44,6 +46,7 @@ import argparse
 import asyncio
 import json
 import sys
+import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -96,6 +99,8 @@ class _AppState:
         self.env_path = Path(env_path)
         # 连通性测试结果的落盘位置（设置页预填 / 首页 banner 都读它）
         self.state_path = Path(state_path)
+        # 防并发 poll：第二个请求返回 409，避免重复调 LLM 烧 token
+        self.poll_lock = threading.Lock()
 
 
 # HTTP 服务是长驻进程，Container 只装配一次（改配置时由 reload 就地重建）
@@ -234,6 +239,11 @@ class WebHandler(BaseHTTPRequestHandler):
         if self._blocked_in_setup_mode(parsed.path):
             return
 
+        # 页面上的"拉取"按钮（会真调外部 API + LLM，故带并发锁）
+        if parsed.path == "/api/poll":
+            self._handle_poll()
+            return
+
         # 形如 /api/tasks/{id}/done 或 /api/tasks/{id}/undone
         if (
             len(parts) == 4
@@ -302,6 +312,43 @@ class WebHandler(BaseHTTPRequestHandler):
             self._json({"ok": False, "error": f"unknown path: {path}"}, status=404)
             return
         handler()
+
+    # ---------- 业务动作端点 ----------
+
+    def _handle_poll(self) -> None:
+        """触发一次 poll。同步阻塞（单机单人使用，30-60 秒可接受）。
+
+        用 _state.poll_lock 防并发：第二个请求返回 409，避免重复调 LLM 烧 token。
+        """
+        if _state.setup_mode:
+            self._json({"ok": False, "error": "配置未完成"}, status=400)
+            return
+        if not _state.poll_lock.acquire(blocking=False):
+            self._json({"ok": False, "error": "已有拉取任务在执行中，请稍候"}, status=409)
+            return
+        try:
+            container = _state.container
+            if container is None:  # pragma: no cover - 正常模式下不会是 None
+                self._json({"ok": False, "error": "container not initialised"}, status=500)
+                return
+            result = asyncio.run(container.facade.invoke("poll_now", {}))
+        except Exception as exc:  # noqa: BLE001 —— 异常也要回给页面，不能让它变成空响应
+            self._json({"ok": False, "error": f"拉取失败：{exc}"}, status=500)
+            return
+        finally:
+            _state.poll_lock.release()
+
+        if not result.get("ok"):
+            self._json({"ok": False, "error": result.get("error", "拉取失败")}, status=500)
+            return
+
+        # 记录 Canvas 体检结果（供首页 banner 用）；体检是附加信息，失败不该影响本次结论
+        try:
+            setup_config.check_canvas(_state.env_path, _state.state_path, _state.settings_path)
+        except Exception:  # noqa: BLE001, S110 —— 体检失败只忽略，不要连累拉取结果
+            pass
+
+        self._json({"ok": True, "data": result["data"]})
 
     def _read_json_body(self) -> dict[str, Any]:
         """读并解析请求体；空体返回 {}，非法 JSON 抛 ValueError（调用方转 400）。"""

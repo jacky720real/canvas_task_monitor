@@ -167,12 +167,30 @@ def test_unknown_path_returns_404(web_server: str) -> None:
     assert "error" in payload
 
 
-def test_poll_endpoint_not_exposed(web_server: str) -> None:
-    """轮询会真调外部 API 并烧 token，绝不能在浏览器里一键触发。"""
-    status, payload = _request_http_error(web_server + "/api/poll", method="POST")
+def test_poll_endpoint_in_setup_mode_is_blocked(setup_mode_server: str) -> None:
+    """配置模式下不能触发拉取：与其它业务 API 一样返回 503（统一语义）。"""
+    status, payload = _request_http_error(setup_mode_server + "/api/poll", method="POST")
 
-    assert status == 404
+    assert status == 503
     assert payload["ok"] is False
+
+
+def test_poll_endpoint_success(web_server: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """/api/poll 必须走 facade.invoke("poll_now")，并把统计原样回给页面。"""
+    stats = {"sources": 1, "changes": 3, "tasks": 2, "llm_calls": 1}
+    calls: list[tuple[str, dict]] = []
+
+    async def fake_invoke(action: str, params: dict) -> dict:
+        calls.append((action, params))
+        return {"ok": True, "data": stats}
+
+    monkeypatch.setattr(web_main._state.container.facade, "invoke", fake_invoke)
+
+    status, payload = _request(web_server + "/api/poll", method="POST")
+
+    assert status == 200
+    assert payload == {"ok": True, "data": stats}
+    assert calls == [("poll_now", {})]
 
 
 @pytest.fixture

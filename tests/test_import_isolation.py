@@ -81,6 +81,7 @@ WEB_ENTRY_ALLOWED_MODULES = {
     "json",
     "pathlib",
     "sys",
+    "threading",  # Part 2：/api/poll 的并发锁（threading.Lock）
     "typing",
     "urllib.parse",
     "webbrowser",
@@ -159,8 +160,9 @@ def test_web_entry_is_thin_adapter() -> None:
     # 配置向导端点只准转发给 setup_config，不许自己读写配置
     assert "setup_config.save_config(" in source
     assert "setup_config.test_canvas(" in source and "setup_config.test_ai(" in source
-    # 刻意不暴露轮询端点（会烧 token）
-    assert 'parsed.path == "/api/poll"' not in source
+    # 轮询端点是"用户明确要求"暴露的：仍必须是薄适配层（只转发给 facade）
+    assert 'parsed.path == "/api/poll"' in source
+    assert "poll_now" in source
 
 
 def test_setup_config_has_no_business_imports() -> None:
