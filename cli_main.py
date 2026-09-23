@@ -4,6 +4,7 @@
 - 标准库：argparse / asyncio / sys / pathlib / typing
 - 第三方：rich（表格与面板）
 - 本项目：services.bootstrap.Container、contracts.plugin.PLUGIN_API_VERSION（元信息，非业务逻辑）
+- 本项目根级模块：setup_config（配置工具：读 .env 凭据、写 data/state.json）
 
 【禁止 import】
 TaskService / TaskRepo / Poller / TaskExtractor / 任何 connector / 任何 domain 类。
@@ -24,15 +25,18 @@ from typing import Any
 
 # 开发期未 pip install -e . 时的兜底：把 src/ 加进 sys.path。
 # 注意：绝不要写成 from src.canvas_task_monitor.xxx —— 那会让同一模块被加载两次。
-_SRC = Path(__file__).resolve().parent / "src"
-if _SRC.exists() and str(_SRC) not in sys.path:
-    sys.path.insert(0, str(_SRC))
+_ROOT = Path(__file__).resolve().parent
+_SRC = _ROOT / "src"
+for _entry in (_SRC, _ROOT):
+    if _entry.exists() and str(_entry) not in sys.path:
+        sys.path.insert(0, str(_entry))
 
 from rich.console import Console
 from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
+import setup_config  # 根级模块：读 .env 凭据 / 写 data/state.json（不含任何业务逻辑）
 from canvas_task_monitor.contracts.plugin import PLUGIN_API_VERSION
 from canvas_task_monitor.services.bootstrap import Container
 
@@ -122,8 +126,42 @@ def _render_task_detail(row: dict[str, Any]) -> None:
     )
 
 
+def _is_token_problem(error: Any) -> bool:
+    """错误文本里同时出现 401 和 canvas，才判定为 token 问题（避免误报）。"""
+    text = str(error).lower()
+    return "401" in text and "canvas" in text
+
+
+def _report_canvas_token(args: argparse.Namespace) -> None:
+    """探一次 Canvas，把结果写进 data/state.json，必要时打印 token 友好提示。
+
+    【为什么 poll 之后要额外探一次】
+    Poller.poll_once 对单源失败是"只记日志、continue"（刻意设计：一个源挂了不该让整轮失败），
+    所以 token 过期时 facade 返回的仍然是 {"ok": True, "data": {...}}，401 只出现在日志里。
+    要让学生看到"token 可能已过期"，CLI 必须自己探一次；这次探测同时会把结果落进
+    data/state.json，Web 首页据此显示黄色 banner。
+
+    只在 settings.yaml 启用了 canvas 源时才探——否则会为一个根本没用上的数据源误导用户。
+    """
+    settings_path = Path(args.settings)
+    if "canvas" not in setup_config.configured_sources(settings_path):
+        return
+
+    env_path = settings_path.parent.parent / ".env"
+    ok, result = setup_config.check_canvas(env_path, setup_config.state_path_for(settings_path))
+    if ok:
+        return
+
+    error = result.get("error")
+    if _is_token_problem(error):
+        console.print("[yellow]Canvas token 可能已过期或失效。[/yellow]")
+        console.print("[yellow]请访问 http://127.0.0.1:8765/setup 更新 token。[/yellow]")
+    else:
+        console.print(f"[yellow]Canvas 连通性自检未通过：{escape(str(error))}[/yellow]")
+
+
 def cmd_poll(args: argparse.Namespace) -> int:
-    """立即轮询一次（走 facade：一次性请求-响应语义）。"""
+    """立即轮询一次（走 facade：一次性请求-响应语义），随后做一次 Canvas token 体检。"""
 
     async def _run() -> int:
         container = _get_container(args)
@@ -133,12 +171,14 @@ def cmd_poll(args: argparse.Namespace) -> int:
             await container.aclose()
         if not result["ok"]:
             _print_error(result["error"])
+            _report_canvas_token(args)
             return EXIT_FAILURE
         stats = result["data"]
         console.print(
             f"轮询完成：来源 {stats['sources']}，变更 {stats['changes']}，"
             f"任务 {stats['tasks']}，LLM 调用 {stats['llm_calls']}"
         )
+        _report_canvas_token(args)
         return EXIT_OK
 
     return asyncio.run(_run())

@@ -76,6 +76,23 @@
   .result.bad { color: var(--danger); }
   .radio { display: flex; align-items: center; gap: 8px; margin: 8px 0; color: var(--ink); font-size: 14px; }
   .hidden { display: none; }
+  .statusbar {
+    padding: 10px 14px;
+    border-radius: 8px;
+    border-left: 4px solid var(--line);
+    background: var(--card);
+    color: var(--muted);
+    font-size: 13px;
+  }
+  .statusbar.ok { background: #F1F7F1; border-left-color: var(--green); color: var(--green); }
+  .statusbar.warn { background: #FFF8E1; border-left-color: #D4A843; color: #8A6D1F; }
+  /* 已保存的敏感字段：看着像提示，点一下才变成真正的输入框 */
+  input.saved {
+    border-style: dashed;
+    background: #FCFBF8;
+    color: var(--muted);
+    cursor: pointer;
+  }
   footer.bar {
     position: sticky;
     bottom: 0;
@@ -96,6 +113,8 @@
   <span class="sub">三步走完：Canvas → AI →（邮箱可选）。配置只写进你自己电脑的 .env，不会上传。</span>
 </header>
 <main>
+  <div class="statusbar hidden" id="statusbar"></div>
+
   <section class="card">
     <h2>1. Canvas LMS <span class="hint">必填</span></h2>
     <label for="canvas-url">Canvas 网址</label>
@@ -198,6 +217,123 @@ async function postJSON(url, body) {
   }
 }
 
+/** 转义用户内容（防 XSS）。 */
+function esc(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (ch) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]
+  ));
+}
+
+function timeText(value) {
+  return value ? String(value).slice(0, 16).replace("T", " ") : "—";
+}
+
+/** 敏感字段 id → 点开后的占位符（配合下边的"已保存 / 没碰过 = null"三态）。 */
+const SENSITIVE_IDS = ["canvas-token", "ai-key", "imap-password"];
+const SENSITIVE_PLACEHOLDER = {
+  "canvas-token": "粘贴新的令牌",
+  "ai-key": "粘贴新的 API Key",
+  "imap-password": "粘贴新的密码 / 授权码",
+};
+
+/** 当前配置（GET /api/setup/current 的返回，**不含**敏感字段明文）。 */
+let current = {};
+
+/** 该敏感字段是否"已保存且没被碰过" → 提交时发 null，后端保留原值。 */
+function isKept(id) {
+  const node = $(id);
+  return node.dataset.saved === "1" && node.dataset.touched !== "1";
+}
+
+function sensitiveValue(id) {
+  return isKept(id) ? null : $(id).value;
+}
+
+/** 已保存的敏感字段渲染成提示样式；点一下（focus）才变成真正的空输入框。 */
+function applySavedState(id, saved) {
+  const node = $(id);
+  node.dataset.saved = saved ? "1" : "";
+  node.dataset.touched = "";
+  node.value = "";
+  node.classList.toggle("saved", Boolean(saved));
+  if (saved) node.placeholder = "已保存（点此重新设置）";
+}
+
+SENSITIVE_IDS.forEach((id) => {
+  $(id).addEventListener("focus", () => {
+    const node = $(id);
+    if (node.dataset.saved === "1" && node.dataset.touched !== "1") {
+      node.dataset.touched = "1";
+      node.classList.remove("saved");
+      node.placeholder = SENSITIVE_PLACEHOLDER[id];
+    }
+  });
+});
+
+/** 顶部状态条：有上次测试记录才显示（失败=黄色，成功=绿色）。 */
+function renderStatusBar() {
+  const bar = $("statusbar");
+  const test = current.last_test || {};
+  const lines = [];
+  if (test.canvas_ok === false) {
+    lines.push(
+      `上次 Canvas 测试失败：${esc(test.canvas_error || "未知错误")}（${esc(timeText(test.tested_at))}）`
+    );
+  } else if (test.canvas_ok === true) {
+    lines.push(`上次 Canvas 测试成功：${esc(timeText(test.tested_at))}`);
+  }
+  if (test.ai_ok === false) {
+    lines.push(
+      `上次 AI 测试失败：${esc(test.ai_error || "未知错误")}（${esc(timeText(test.ai_tested_at))}）`
+    );
+  }
+
+  if (!lines.length) {
+    bar.className = "statusbar hidden";
+    bar.textContent = "";
+    return;
+  }
+  bar.className = "statusbar " + (test.canvas_ok === true && test.ai_ok !== false ? "ok" : "warn");
+  bar.innerHTML = lines.join("　｜　");
+}
+
+/** 拉当前配置做预填（读不到就当全新配置，宽容）。 */
+async function loadCurrent() {
+  try {
+    const response = await fetch("/api/setup/current");
+    const payload = await response.json();
+    if (!payload.ok) return;
+    current = payload.data || {};
+  } catch (error) {
+    return;
+  }
+
+  const canvas = current.canvas || {};
+  const ai = current.ai || {};
+  if (canvas.base_url) $("canvas-url").value = canvas.base_url;
+  if (ai.base_url) $("ai-url").value = ai.base_url;
+  if (ai.model) $("ai-model").value = ai.model;
+  applySavedState("canvas-token", Boolean(canvas.token_saved));
+  applySavedState("ai-key", Boolean(ai.api_key_saved));
+
+  const mail = current.mail;
+  if (mail) {
+    document.querySelector("input[name=mail-mode][value=imap]").checked = true;
+    $("imap-fields").classList.remove("hidden");
+    if (mail.host) $("imap-host").value = mail.host;
+    if (mail.username) $("imap-user").value = mail.username;
+    applySavedState("imap-password", Boolean(mail.password_saved));
+  }
+
+  // 服务商下拉只是"快捷填充"：按已保存的 base_url 反推选中项
+  const matched = Object.entries(PRESETS).find(
+    ([, preset]) => preset.url === $("ai-url").value.trim()
+  );
+  $("ai-provider").value = matched ? matched[0] : "custom";
+
+  renderStatusBar();
+}
+
 $("ai-provider").addEventListener("change", (event) => {
   const preset = PRESETS[event.target.value] || PRESETS.custom;
   $("ai-url").value = preset.url;
@@ -216,7 +352,9 @@ $("test-canvas").addEventListener("click", async () => {
   if (!/^https?:\/\//i.test(baseUrl)) {
     return showResult("result-canvas", false, "网址要以 http:// 或 https:// 开头");
   }
-  if (!token) return showResult("result-canvas", false, "请先填入访问令牌");
+  if (!token && !isKept("canvas-token")) {
+    return showResult("result-canvas", false, "请先填入访问令牌");
+  }
 
   setBusy("test-canvas", true, "测试连接");
   showResult("result-canvas", null, "");
@@ -225,10 +363,11 @@ $("test-canvas").addEventListener("click", async () => {
 
   if (!payload.ok) return showResult("result-canvas", false, payload.error || "连接失败");
   const courses = (payload.courses || []).slice(0, 3).join("、");
+  const used = token ? "" : "（用的是已保存的令牌）";
   showResult(
     "result-canvas",
     true,
-    courses ? `连接成功，课程：${courses}` : "连接成功（该账号下暂无可读课程）"
+    courses ? `连接成功${used}，课程：${courses}` : `连接成功${used}（该账号下暂无可读课程）`
   );
 });
 
@@ -239,7 +378,7 @@ $("test-ai").addEventListener("click", async () => {
   if (!/^https?:\/\//i.test(baseUrl)) {
     return showResult("result-ai", false, "Base URL 要以 http:// 或 https:// 开头");
   }
-  if (!apiKey) return showResult("result-ai", false, "请先填入 API Key");
+  if (!apiKey && !isKept("ai-key")) return showResult("result-ai", false, "请先填入 API Key");
   if (!model) return showResult("result-ai", false, "请先填入模型名");
 
   setBusy("test-ai", true, "测试连接");
@@ -251,23 +390,42 @@ $("test-ai").addEventListener("click", async () => {
   });
   setBusy("test-ai", false, "测试连接");
 
-  if (payload.ok) showResult("result-ai", true, "连接成功，模型可用");
+  const used = apiKey ? "" : "（用的是已保存的 API Key）";
+  if (payload.ok) showResult("result-ai", true, `连接成功${used}，模型可用`);
   else showResult("result-ai", false, payload.error || "连接失败");
 });
 
-/** 收集表单（允许没测试过就保存，宽容）。返回 {error} 或 {canvas, ai, mail}。 */
+/** 收集表单（允许没测试过就保存，宽容）。
+ *
+ * 敏感字段三态：已保存且没碰过 → null（后端保留原值）；碰过 → 发送新值。
+ * 前端额外挡一手"点开了却没填"：避免手一抖把 token 清空。
+ */
 function collect() {
-  const canvas = { base_url: value("canvas-url"), token: value("canvas-token") };
+  const canvas = { base_url: value("canvas-url"), token: sensitiveValue("canvas-token") };
   if (!/^https?:\/\//i.test(canvas.base_url)) {
     return { error: "Canvas 网址要以 http:// 或 https:// 开头" };
   }
-  if (!canvas.token) return { error: "请填写 Canvas 访问令牌" };
+  if (canvas.token === null && !isKept("canvas-token")) {
+    return { error: "请填写 Canvas 访问令牌" };
+  }
+  if (canvas.token !== null && !canvas.token) {
+    return { error: "请粘贴新的 Canvas 令牌（或刷新页面放弃修改）" };
+  }
 
-  const ai = { base_url: value("ai-url"), api_key: value("ai-key"), model: value("ai-model") };
+  const ai = {
+    base_url: value("ai-url"),
+    api_key: sensitiveValue("ai-key"),
+    model: value("ai-model"),
+  };
   if (!/^https?:\/\//i.test(ai.base_url)) {
     return { error: "AI Base URL 要以 http:// 或 https:// 开头" };
   }
-  if (!ai.api_key) return { error: "请填写 AI 的 API Key" };
+  if (ai.api_key === null && !isKept("ai-key")) {
+    return { error: "请填写 AI 的 API Key" };
+  }
+  if (ai.api_key !== null && !ai.api_key) {
+    return { error: "请粘贴新的 API Key（或刷新页面放弃修改）" };
+  }
   if (!ai.model) return { error: "请填写模型名" };
 
   let mail = null;
@@ -276,10 +434,16 @@ function collect() {
       provider: "imap",
       host: value("imap-host"),
       username: value("imap-user"),
-      password: $("imap-password").value,
+      password: sensitiveValue("imap-password"),
     };
-    if (!mail.host || !mail.username || !mail.password) {
-      return { error: "IMAP 三项都要填（想跳过就把邮箱那栏选回「先跳过」）" };
+    if (!mail.host || !mail.username) {
+      return { error: "IMAP 的服务器与账号都要填（想跳过就把邮箱那栏选回「先跳过」）" };
+    }
+    if (mail.password === null && !isKept("imap-password")) {
+      return { error: "邮箱密码 / 授权码是必填的" };
+    }
+    if (mail.password !== null && !mail.password) {
+      return { error: "请粘贴新的邮箱密码 / 授权码（或刷新页面放弃修改）" };
     }
   }
   return { canvas: canvas, ai: ai, mail: mail };
@@ -310,6 +474,9 @@ $("finish").addEventListener("click", async () => {
   showResult("result-save", true, "配置完成，正在进入任务清单…");
   window.location.href = "/";
 });
+
+// 进页面先拉当前配置：普通字段预填，敏感字段显示"已保存（点此重新设置）"
+loadCurrent();
 </script>
 </body>
 </html>

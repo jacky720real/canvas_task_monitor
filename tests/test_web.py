@@ -33,6 +33,7 @@ TEMPLATE = PROJECT / "config" / "templates" / "task_extract_template.yaml"
 if str(PROJECT) not in sys.path:
     sys.path.insert(0, str(PROJECT))
 
+import setup_config  # 同上：根级配置工具
 import web_main  # 入口文件在项目根，需先把根加进 sys.path（本项目未启用 E402，无需 noqa）
 
 
@@ -62,7 +63,8 @@ def web_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]
         "ai": {"base_url": "http://127.0.0.1:9/v1", "api_key": "sk-test", "model": "demo"},
         "template_path": str(TEMPLATE),
     }
-    settings_path = tmp_path / "settings.yaml"
+    settings_path = tmp_path / "config" / "settings.yaml"
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
     settings_path.write_text(yaml.safe_dump(settings, allow_unicode=True), encoding="utf-8")
 
     container = Container(settings_path)
@@ -92,9 +94,19 @@ def web_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]
             score=18,
         )
     )
-    # 注入"已配置 + 正常模式"的进程状态（不依赖开发机上的 .env）
+    # 注入"已配置 + 正常模式"的进程状态；路径全部指向临时目录，
+    # 免得测试读到（或写到）开发机上真实的 .env / data/state.json
     monkeypatch.setattr(
-        web_main, "_state", web_main._AppState(container=container, setup_mode=False)
+        web_main,
+        "_state",
+        web_main._AppState(
+            container=container,
+            setup_mode=False,
+            settings_path=settings_path,
+            env_path=tmp_path / ".env",
+            # 与 load_current_config 内部推导的一致（<settings 上两级>/data/state.json）
+            state_path=setup_config.state_path_for(settings_path),
+        ),
     )
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), web_main.WebHandler)
@@ -164,9 +176,19 @@ def test_poll_endpoint_not_exposed(web_server: str) -> None:
 
 
 @pytest.fixture
-def setup_mode_server(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
+def setup_mode_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
     """起真实 HTTP 服务，但把进程状态置为"未配置"（配置模式）。"""
-    monkeypatch.setattr(web_main, "_state", web_main._AppState(container=None, setup_mode=True))
+    monkeypatch.setattr(
+        web_main,
+        "_state",
+        web_main._AppState(
+            container=None,
+            setup_mode=True,
+            settings_path=tmp_path / "config" / "settings.yaml",
+            env_path=tmp_path / ".env",
+            state_path=tmp_path / "data" / "state.json",
+        ),
+    )
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), web_main.WebHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -212,4 +234,23 @@ def test_setup_page_accessible(setup_mode_server: str) -> None:
     assert 'id="finish"' in html  # "完成配置，开始使用"
     assert html.count('type="password"') >= 3  # Canvas Token / API Key / IMAP 密码都不外显
     assert "test-canvas" in html and "test-ai" in html  # 两个"测试连接"按钮
+
+
+def test_get_setup_current_endpoint(web_server: str) -> None:
+    """设置页预填 + 首页 banner 都读这个端点；必须可用且不回敏感明文。"""
+    # 制造一条"上次 Canvas 测试失败"的记录（CLI 写的就是同一个 state.json）
+    setup_config.record_test("canvas", False, "401: 令牌无效", web_main._state.state_path)
+
+    status, payload = _request(web_server + "/api/setup/current")
+
+    assert status == 200
+    assert payload["ok"] is True
+
+    data = payload["data"]
+    assert set(data["canvas"]) == {"base_url", "token_saved"}  # 不回明文
+    assert data["canvas"]["token_saved"] is False  # 临时目录里没有 .env
+    assert data["last_test"]["canvas_ok"] is False
+    assert data["last_test"]["canvas_error"] == "401: 令牌无效"
+    assert data["last_test"]["tested_at"]  # 带了时间戳（banner 要显示）
+
 

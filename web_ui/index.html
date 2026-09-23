@@ -130,6 +130,18 @@
     text-align: center;
   }
   .state.error { color: var(--danger); border-color: #E7C9C1; }
+  .banner {
+    max-width: 720px;
+    margin: 16px auto 0;
+    padding: 12px 16px;
+    background: #FFF8E1;
+    border-left: 4px solid #D4A843;
+    border-radius: 8px;
+    color: var(--muted);
+    font-size: 14px;
+  }
+  .banner a { color: #8A6D1F; }
+  .banner.hidden { display: none; }
 </style>
 </head>
 <body>
@@ -144,6 +156,7 @@
   <button class="refresh" id="refresh">刷新</button>
   <button class="refresh" id="settings" title="回到配置向导">⚙️ 设置</button>
 </header>
+<div class="banner hidden" id="banner"></div>
 <main id="app"></main>
 <script>
 const CATEGORY_LABEL = { assignment: "作业", activity: "活动", reminder: "提醒" };
@@ -274,6 +287,24 @@ app.addEventListener("click", (event) => {
   if (card) card.classList.toggle("open");
 });
 
+/** Canvas 上次测试失败时，在顶部显示黄色横幅（引导去设置页换 token）。 */
+async function loadBanner() {
+  const node = document.getElementById("banner");
+  try {
+    const response = await fetch("/api/setup/current");
+    const payload = await response.json();
+    const test = (payload && payload.data && payload.data.last_test) || {};
+    if (test.canvas_ok !== false) return; // 成功或无记录都不显示
+    node.innerHTML =
+      `⚠️ Canvas 连接失败：${esc(test.canvas_error || "未知错误")}` +
+      `（${esc(timeText(test.tested_at))}）<a href="/setup">点此更新 token →</a>`;
+    node.classList.remove("hidden");
+  } catch (error) {
+    // 读不到就不显示（宽容）
+  }
+}
+
+loadBanner();
 load();
 
 </script>

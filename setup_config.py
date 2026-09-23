@@ -23,6 +23,7 @@ Container / facade / interfaces.dto / 任何 domain 类。
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from datetime import datetime
@@ -34,6 +35,9 @@ import yaml
 
 CANVAS_REQUIRED_KEYS = ("CANVAS_BASE_URL", "CANVAS_TOKEN")
 AI_REQUIRED_KEYS = ("LLM_BASE_URL", "LLM_API_KEY")
+
+# 连通性测试结果的落盘文件（相对 settings.yaml 所在目录的上一级），见 state_path_for
+DEFAULT_STATE_NAME = "state.json"
 
 CANVAS_TIMEOUT = 10.0
 AI_TIMEOUT = 15.0
@@ -108,6 +112,163 @@ def refresh_process_env(env_path: Path) -> dict[str, str]:
     values = read_env(env_path)
     os.environ.update(values)
     return values
+
+
+# ---------- 状态文件（data/state.json） ----------
+
+
+def state_path_for(settings_path: Path) -> Path:
+    """state.json 的约定位置：settings.yaml 所在目录的上一级 + data/。"""
+    return Path(settings_path).parent.parent / "data" / DEFAULT_STATE_NAME
+
+
+def read_state(state_path: Path) -> dict[str, Any]:
+    """读 state.json；不存在 / 内容坏掉一律返回 {}（状态文件不该拖垮主流程）。"""
+    path = Path(state_path)
+    if not path.is_file():
+        return {}
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def record_test(kind: str, ok: bool, error: str | None, state_path: Path) -> dict[str, Any]:
+    """记录一次连通性测试结果（kind = "canvas" / "ai"），写进 state.json。
+
+    Web 端据此显示"上次测试失败：401: 令牌无效"，CLI 据此提示 token 过期。
+    """
+    state = read_state(state_path)
+    state[f"last_{kind}_test"] = {
+        "ok": bool(ok),
+        "error": None if ok else (error or "未知错误"),
+        "tested_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+    }
+    path = Path(state_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return state
+
+
+def read_settings_sections(settings_path: Path) -> dict[str, Any]:
+    """读 settings.yaml 的顶层映射；文件不存在 / 坏掉返回 {}。"""
+    path = Path(settings_path)
+    if not path.is_file():
+        return {}
+    try:
+        loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def configured_sources(settings_path: Path) -> list[str]:
+    """读 settings.yaml 的 poll.sources（读不到就返回空列表）。"""
+    poll = read_settings_sections(settings_path).get("poll")
+    if not isinstance(poll, dict):
+        return []
+    sources = poll.get("sources")
+    return [str(item) for item in sources] if isinstance(sources, list) else []
+
+
+def canvas_credentials(env_path: Path) -> tuple[str, str]:
+    """取 Canvas 凭据：优先 .env（配置向导写的），缺失时才用进程环境变量。"""
+    env = read_env(env_path)
+    base_url = env.get("CANVAS_BASE_URL") or os.environ.get("CANVAS_BASE_URL", "")
+    token = env.get("CANVAS_TOKEN") or os.environ.get("CANVAS_TOKEN", "")
+    return base_url.strip(), token.strip()
+
+
+def check_canvas(env_path: Path, state_path: Path) -> tuple[bool, dict[str, Any]]:
+    """用当前凭据探一次 Canvas，并把结果写进 state.json（供 CLI 做 token 体检）。
+
+    凭据完全没配时只返回错误、不写状态——免得在"根本没配 Canvas"的机器上
+    留下一条假的失败记录，进而在 Web 上弹出一个莫名其妙的 banner。
+    """
+    base_url, token = canvas_credentials(env_path)
+    if not base_url or not token:
+        return False, {"error": "Canvas 未配置（缺少 CANVAS_BASE_URL / CANVAS_TOKEN）"}
+
+    ok, result = test_canvas(base_url, token)
+    record_test("canvas", ok, result.get("error"), state_path)
+    return ok, result
+
+
+def saved_secret(env_path: Path, key: str) -> str:
+    """取 .env 里某个密钥的已存值。
+
+    用途：设置页预填后敏感字段是空的（前端拿不到明文），用户直接点"测试连接"时
+    应当拿**已保存的**密钥去测，而不是报"请先填入"。
+    """
+    return read_env(env_path).get(key, "").strip()
+
+
+def load_current_config(env_path: Path, settings_path: Path) -> dict[str, Any]:
+    """读取当前配置，供设置页预填。
+
+    返回：
+    {
+        "canvas": {"base_url": "https://...", "token_saved": True},
+        "ai": {"base_url": "...", "model": "...", "api_key_saved": True},
+        "mail": None | {"provider": "imap", "host": "...", "username": "...",
+                        "password_saved": True},
+        "last_test": {
+            "canvas_ok": True | False | None,
+            "canvas_error": "401: 令牌无效" | None,
+            "tested_at": "2026-09-23T15:07:32+08:00" | None,
+            "ai_ok": True | False | None,          # 同结构，给 AI 卡片复用
+            "ai_error": "401: Key 无效" | None,
+            "ai_tested_at": "..." | None,
+        },
+    }
+
+    注意：
+    - **不返回敏感字段的真实值**（token / api_key / password），只返回 `xxx_saved: True/False`
+    - mail 只有在 settings.yaml 的 poll.sources 里启用了 mail 时才有值
+    """
+    env = read_env(env_path)
+    sources = configured_sources(settings_path)
+
+    mail: dict[str, Any] | None = None
+    if "mail" in sources:
+        mail_section = read_settings_sections(settings_path).get("mail")
+        provider = str((mail_section or {}).get("provider") or "graph") if isinstance(
+            mail_section, dict
+        ) else "graph"
+        mail = {
+            "provider": provider,
+            "host": env.get("IMAP_HOST", ""),
+            "username": env.get("IMAP_USER", ""),
+            "password_saved": not _is_missing(env.get("IMAP_PASSWORD")),
+        }
+
+    state = read_state(state_path_for(settings_path))
+    canvas_test = state.get("last_canvas_test")
+    ai_test = state.get("last_ai_test")
+    canvas_test = canvas_test if isinstance(canvas_test, dict) else {}
+    ai_test = ai_test if isinstance(ai_test, dict) else {}
+
+    return {
+        "canvas": {
+            "base_url": env.get("CANVAS_BASE_URL", ""),
+            "token_saved": not _is_missing(env.get("CANVAS_TOKEN")),
+        },
+        "ai": {
+            "base_url": env.get("LLM_BASE_URL", ""),
+            "model": env.get("LLM_MODEL", ""),
+            "api_key_saved": not _is_missing(env.get("LLM_API_KEY")),
+        },
+        "mail": mail,
+        "last_test": {
+            "canvas_ok": canvas_test.get("ok"),
+            "canvas_error": canvas_test.get("error"),
+            "tested_at": canvas_test.get("tested_at"),
+            "ai_ok": ai_test.get("ok"),
+            "ai_error": ai_test.get("error"),
+            "ai_tested_at": ai_test.get("tested_at"),
+        },
+    }
 
 
 # ---------- 连通性测试 ----------
@@ -231,6 +392,18 @@ def _response_error(response: httpx.Response) -> str:
 # ---------- 写入 ----------
 
 
+def _decided(values: dict[str, str], key: str, candidate: Any) -> None:
+    """按"没碰 / 清空 / 覆盖"三态决定是否写入某个 KEY。
+
+    - candidate 为 None → 视为"没碰"：不放进 values，`_update_env` 就保留 .env 里的原行
+    - candidate 为 ""   → 清空该项
+    - 其它              → 用新值覆盖
+    """
+    if candidate is None:
+        return
+    values[key] = str(candidate).strip()
+
+
 def save_config(
     canvas: dict[str, Any],
     ai: dict[str, Any],
@@ -242,13 +415,16 @@ def save_config(
 
     - .env 与 settings.yaml 若已存在，先各备份一份（.backup.{YYYYMMDD_HHMMSS}，不覆盖旧备份）
     - 写入 .env（保留其他行与注释，只更新目标 KEY）
+    - 字段三态语义（设置页预填后只改一个字段时用得上）：
+        None = 没碰，保留 .env 原值 ／ "" = 清空 ／ 非空字符串 = 覆盖
+      canvas.token / ai.api_key / mail.password 三个敏感字段同样支持
     - 更新 settings.yaml 的 poll.sources；配置了邮箱时同时把 mail.provider 改成 imap
       （不改 provider 的话，预检会拿 graph 的必需字段去校验，必然失败）
 
-    :param canvas: {"base_url": "...", "token": "..."}
-    :param ai: {"base_url": "...", "api_key": "...", "model": "..."}
+    :param canvas: {"base_url": "...", "token": None | "..."}
+    :param ai: {"base_url": "...", "api_key": None | "...", "model": "..."}
     :param mail: None（跳过邮箱）或
-        {"provider": "imap", "host": ..., "username": ..., "password": ...}
+        {"provider": "imap", "host": ..., "username": ..., "password": None | "..."}
     """
     env_path = Path(env_path)
     settings_path = Path(settings_path)
@@ -256,22 +432,21 @@ def save_config(
     backup_file(env_path)
     backup_file(settings_path)
 
-    values: dict[str, str] = {
-        "CANVAS_BASE_URL": str(canvas.get("base_url", "")).strip(),
-        "CANVAS_TOKEN": str(canvas.get("token", "")).strip(),
-        "LLM_BASE_URL": str(ai.get("base_url", "")).strip(),
-        "LLM_API_KEY": str(ai.get("api_key", "")).strip(),
-        "LLM_MODEL": str(ai.get("model", "")).strip(),
-    }
+    values: dict[str, str] = {}
+    _decided(values, "CANVAS_BASE_URL", canvas.get("base_url"))
+    _decided(values, "CANVAS_TOKEN", canvas.get("token"))
+    _decided(values, "LLM_BASE_URL", ai.get("base_url"))
+    _decided(values, "LLM_API_KEY", ai.get("api_key"))
+    _decided(values, "LLM_MODEL", ai.get("model"))
 
     sources = ["canvas"]
     provider: str | None = None
     if mail:
         provider = str(mail.get("provider") or "imap").lower()
         if provider == "imap":
-            values["IMAP_HOST"] = str(mail.get("host", "")).strip()
-            values["IMAP_USER"] = str(mail.get("username", "")).strip()
-            values["IMAP_PASSWORD"] = str(mail.get("password", "")).strip()
+            _decided(values, "IMAP_HOST", mail.get("host"))
+            _decided(values, "IMAP_USER", mail.get("username"))
+            _decided(values, "IMAP_PASSWORD", mail.get("password"))
         sources.append("mail")
 
     _update_env(env_path, values)

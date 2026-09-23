@@ -26,6 +26,7 @@ TaskService / TaskRepo / Poller / TaskExtractor / 任何 connector /
 【端点】
   GET  /                                    → 正常模式给 web_ui/index.html；配置模式 302 → /setup
   GET  /setup                               → web_ui/setup.html（配置向导）
+  GET  /api/setup/current                   → setup_config.load_current_config(...)（不含敏感值）
   GET  /api/tasks?category=&status=&limit=  → facade.invoke("list_tasks", {...})
   GET  /api/tasks/{id}                      → facade.invoke("get_task", {...})
   POST /api/tasks/{id}/done | /undone       → facade.invoke("mark_task", {...})
@@ -64,6 +65,7 @@ PROG = "ctm-web"
 DEFAULT_PORT = 8765
 DEFAULT_SETTINGS = "./config/settings.yaml"
 DEFAULT_ENV = "./.env"
+DEFAULT_STATE = "./data/state.json"
 UI_DIR = Path(__file__).resolve().parent / "web_ui"
 INDEX_FILE = UI_DIR / "index.html"
 SETUP_FILE = UI_DIR / "setup.html"
@@ -86,11 +88,14 @@ class _AppState:
         setup_mode: bool = True,  # 初始假设需要配置，装配成功才切到正常模式
         settings_path: Path | str = DEFAULT_SETTINGS,
         env_path: Path | str = DEFAULT_ENV,
+        state_path: Path | str = DEFAULT_STATE,
     ) -> None:
         self.container: Container | None = container
         self.setup_mode = setup_mode
         self.settings_path = Path(settings_path)
         self.env_path = Path(env_path)
+        # 连通性测试结果的落盘位置（设置页预填 / 首页 banner 都读它）
+        self.state_path = Path(state_path)
 
 
 # HTTP 服务是长驻进程，Container 只装配一次（改配置时由 reload 就地重建）
@@ -180,6 +185,16 @@ class WebHandler(BaseHTTPRequestHandler):
                 self._redirect("/setup")
                 return
             self._serve_file(INDEX_FILE, "index.html")
+            return
+
+        # 当前配置（不含敏感值）：配置向导预填 + 首页 banner 都用它，两种模式下都可用
+        if parsed.path == "/api/setup/current":
+            self._json(
+                {
+                    "ok": True,
+                    "data": setup_config.load_current_config(_state.env_path, _state.settings_path),
+                }
+            )
             return
 
         if self._blocked_in_setup_mode(parsed.path):
@@ -307,7 +322,11 @@ class WebHandler(BaseHTTPRequestHandler):
             self._json({"ok": False, "error": str(exc)}, status=400)
             return
 
-        ok, result = setup_config.test_canvas(body.get("base_url", ""), body.get("token", ""))
+        # 敏感字段留空时用 .env 里已保存的值（预填页面上用户没重新粘贴）
+        token = body.get("token") or setup_config.saved_secret(_state.env_path, "CANVAS_TOKEN")
+        ok, result = setup_config.test_canvas(body.get("base_url", ""), token)
+        # 测试结果落盘：设置页顶部状态条 / 首页 banner 都靠它
+        setup_config.record_test("canvas", ok, result.get("error"), _state.state_path)
         self._json({"ok": ok, **result})
 
     def _handle_setup_test_ai(self) -> None:
@@ -317,9 +336,11 @@ class WebHandler(BaseHTTPRequestHandler):
             self._json({"ok": False, "error": str(exc)}, status=400)
             return
 
+        api_key = body.get("api_key") or setup_config.saved_secret(_state.env_path, "LLM_API_KEY")
         ok, result = setup_config.test_ai(
-            body.get("base_url", ""), body.get("api_key", ""), body.get("model", "")
+            body.get("base_url", ""), api_key, body.get("model", "")
         )
+        setup_config.record_test("ai", ok, result.get("error"), _state.state_path)
         self._json({"ok": ok, **result})
 
     def _handle_setup_save(self) -> None:
@@ -385,6 +406,8 @@ def main() -> int:
     _state.settings_path = Path(args.settings)
     # 与 core/config.py 的约定一致：.env 放在 settings.yaml 所在目录的上一级（项目根）
     _state.env_path = _state.settings_path.parent.parent / ".env"
+    # state.json 同目录的 data/ 下（setup_config 统一约定，CLI 也用同一处）
+    _state.state_path = setup_config.state_path_for(_state.settings_path)
 
     configured = setup_config.is_configured(_state.env_path, _state.settings_path)
     try:
