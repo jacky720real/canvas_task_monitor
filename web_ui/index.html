@@ -142,6 +142,7 @@
     <button class="chip" data-category="reminder">提醒</button>
   </div>
   <button class="refresh" id="refresh">刷新</button>
+  <button class="refresh" id="settings" title="回到配置向导">⚙️ 设置</button>
 </header>
 <main id="app"></main>
 <script>
@@ -257,6 +258,10 @@ document.getElementById("filters").addEventListener("click", (event) => {
 });
 
 document.getElementById("refresh").addEventListener("click", load);
+
+document.getElementById("settings").addEventListener("click", () => {
+  window.location.href = "/setup";
+});
 
 app.addEventListener("click", (event) => {
   const check = event.target.closest("[data-action='toggle']");

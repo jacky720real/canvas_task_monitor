@@ -22,3 +22,8 @@ logs/
 # ---- 本地配置与密钥 ----
 .env
 .env.local
+
+# 配置向导生成的备份文件
+*.backup.*
+.env.backup.*
+config/*.backup.*

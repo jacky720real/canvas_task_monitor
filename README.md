@@ -81,17 +81,35 @@ canvas_task_monitor/
 - **`score` 不由 LLM 输出**，由代码根据 `urgency × 权重 + importance × 权重` 计算，
   公式可通过 `settings.yaml` 的 `ai.score_weights` 调整。
 
-## 快速开始
+## 🚀 零基础开始
+
+**1. 安装**
+```bash
+uv venv --python 3.12
+uv pip install -e ".[dev,mcp]"
+```
+
+**2. 启动**
+```bash
+python web_main.py
+```
+浏览器会自动打开。**首次使用**会看到配置向导，跟着走完即可；
+**之后**直接看到任务列表。
+
+**3. 日常使用**
+```bash
+python web_main.py        # 打开网页界面
+python cli_main.py watch  # 可选：挂后台自动轮询
+```
+
+不熟悉命令行的用户，**只需要记住 `python web_main.py` 这一条命令**。
+
+> 没有 `uv` 也无所谓：`python -m venv .venv` 然后 `pip install -e ".[dev,mcp]"` 等价。
+> 配置文件（`.env`、`config/settings.yaml`）全部由网页向导代写，不需要手动 `copy .env.example`。
+
+CLI 形态的等价用法：
 
 ```bash
-# 1. 安装（不带 extras 即可使用 CLI）
-pip install -e .
-
-# 2. 生成本地配置
-copy .env.example .env      # Windows；macOS/Linux 用 cp
-# 编辑 .env，填入 CANVAS_BASE_URL / CANVAS_TOKEN / LLM_* 等
-
-# 3. 使用
 python cli_main.py poll     # 立即轮询一次
 python cli_main.py watch    # 后台持续轮询（Ctrl-C 退出）
 python cli_main.py list     # 查看任务表格
@@ -294,7 +312,7 @@ pytest
 ruff check .
 ```
 
-## Web UI（可选）
+## Web UI + 配置向导
 
 ```bash
 python web_main.py                  # 自动打开浏览器 http://127.0.0.1:8765
@@ -302,10 +320,36 @@ python web_main.py --port 9000      # 指定端口
 python web_main.py --no-browser     # 不自动打开浏览器
 ```
 
-零第三方依赖（标准库 `http.server` + 单文件 `web_ui/index.html`）。
-它和 `cli_main.py` 一样是**薄适配层**：4 个端点全部转发给 `container.facade.invoke`，
-不写任何业务逻辑。**刻意不提供 `/api/poll`** —— 轮询会真实调用外部 API 并消耗
-LLM token，不该是一个能一键触发的动作（要轮询请用 `cli_main.py poll` / `watch`）。
+零第三方依赖（标准库 `http.server` + 两个单文件页 `web_ui/index.html` / `web_ui/setup.html`）。
+它和 `cli_main.py` 一样是**薄适配层**：4 个业务端点全部转发给 `container.facade.invoke`，
+配置向导端点全部转发给根级模块 `setup_config.py`，不写任何业务逻辑。
+**刻意不提供 `/api/poll`** —— 轮询会真实调用外部 API 并消耗 LLM token，
+不该是一个能一键触发的动作（要轮询请用 `cli_main.py poll` / `watch`）。
+
+### 配置向导（首次启动免手改配置）
+
+没配好 `.env` 时启动会**直接进配置模式**，浏览器落在 `/setup`：
+
+| 模式 | `GET /` | 业务 API | 什么时候进入 |
+| --- | --- | --- | --- |
+| 配置模式 | 302 → `/setup` | 503 | `.env` 缺失，或 Canvas / AI 的关键项没填 |
+| 正常模式 | 任务清单 | 正常 | 配置齐全 |
+
+向导三步：**Canvas（必填）→ AI（必填）→ 邮箱（可选，可跳过）**。
+每步都能「测试连接」（真发一个极简请求验证凭据，不是完整业务调用），
+也**允许不测试直接保存**。点「完成配置，开始使用」后依次发生：
+写 `.env` + 更新 `config/settings.yaml` 的 `poll.sources`（改配置前自动备份为
+`.env.backup.{时间戳}` / `settings.yaml.backup.{时间戳}`）→ 就地重建 Container
+（**服务不重启**）→ 前端自动跳到任务列表。
+
+已配置后，任务清单右上角的 **⚙️ 设置**按钮随时回到 `/setup` 改配置。
+
+```
+POST /api/setup/test-canvas   {"base_url": ..., "token": ...}
+POST /api/setup/test-ai       {"base_url": ..., "api_key": ..., "model": ...}
+POST /api/setup/save          {"canvas": {...}, "ai": {...}, "mail": null | {...}}
+POST /api/setup/reload        {}    # 保存后重新装配 Container
+```
 
 > **开发期调用说明**：`pip install -e .` 后 `ctm` / `ctm-web` 命令不可用（setuptools
 > editable 安装对根级入口文件的已知限制）。请用 `python cli_main.py ...` /
@@ -313,12 +357,20 @@ LLM token，不该是一个能一键触发的动作（要轮询请用 `cli_main.
 
 ## 首次启动 checklist
 
-- [ ] 复制 `.env.example` 为 `.env`
-- [ ] 填 Canvas 配置：`CANVAS_BASE_URL`、`CANVAS_TOKEN`
-- [ ] 填邮箱配置（**优先 IMAP**）：`IMAP_HOST`、`IMAP_USER`、`IMAP_PASSWORD`
-- [ ] 填 LLM 配置：`LLM_BASE_URL`、`LLM_API_KEY`、`LLM_MODEL`
-- [ ] `pip install -e ".[dev]"`
-- [ ] `python cli_main.py --version` 输出正常
-- [ ] `python cli_main.py poll` 跑一次（首次会拉全量，可能慢）
-- [ ] `python cli_main.py list` 看任务
+**走网页向导（推荐）**
+
+- [ ] `pip install -e ".[dev,mcp]"`
+- [ ] `python web_main.py` → 浏览器自动打开配置向导
+- [ ] Canvas 一步填完点「测试连接」，看到 ✓
+- [ ] AI 一步选服务商 / 贴 Key，点「测试连接」，看到 ✓
+- [ ] 邮箱可跳过（默认就是「先跳过」）
+- [ ] 点「完成配置，开始使用」→ 自动进入任务列表
+- [ ] `python cli_main.py poll` 拉一次真实数据（首次会拉全量，可能慢）
 - [ ] 可选：`python cli_main.py watch` 后台跑
+
+**手动改配置（备选，等价）**
+
+- [ ] 复制 `.env.example` 为 `.env`，填 `CANVAS_BASE_URL`、`CANVAS_TOKEN`、`LLM_*`
+- [ ] 邮箱（**优先 IMAP**）：`IMAP_HOST`、`IMAP_USER`、`IMAP_PASSWORD`，
+      并把 `config/settings.yaml` 的 `mail.provider` 改成 `imap`
+- [ ] `python cli_main.py --version` 输出正常

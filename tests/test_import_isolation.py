@@ -70,9 +70,9 @@ def test_package_has_no_src_prefix_imports() -> None:
     assert not offenders, f"发现 src. 前缀反模式：{offenders}"
 
 
-ENTRY_FILES = ("cli_main.py", "mcp_server.py", "dsh_plugin.py", "web_main.py")
+ENTRY_FILES = ("cli_main.py", "mcp_server.py", "dsh_plugin.py", "web_main.py", "setup_config.py")
 
-# web_main.py 允许 import 的模块白名单（规格：零新依赖，只用标准库 + Container）
+# web_main.py 允许 import 的模块白名单（规格：零新依赖，只用标准库 + Container + 配置工具）
 WEB_ENTRY_ALLOWED_MODULES = {
     "__future__",
     "argparse",
@@ -85,6 +85,20 @@ WEB_ENTRY_ALLOWED_MODULES = {
     "urllib.parse",
     "webbrowser",
     "canvas_task_monitor.services.bootstrap",
+    "setup_config",
+}
+
+# setup_config.py 允许 import 的模块白名单（配置工具：标准库 + httpx/yaml，不碰业务层）
+SETUP_CONFIG_ALLOWED_MODULES = {
+    "__future__",  # 规格里没列，但 `from __future__ import annotations` 是项目统一写法
+    "datetime",
+    "httpx",
+    "json",
+    "os",
+    "pathlib",
+    "re",
+    "typing",
+    "yaml",
 }
 
 BUSINESS_SYMBOLS = {
@@ -111,7 +125,7 @@ BUSINESS_SYMBOLS = {
 
 
 def test_entry_files_exist_at_project_root() -> None:
-    """四个入口文件都必须在项目根（适配层唯一允许感知宿主的地方）。"""
+    """四个入口文件 + 配置工具都必须在项目根（适配层唯一允许感知宿主的地方）。"""
     root = PACKAGE_ROOT.parents[1]
 
     for name in ENTRY_FILES:
@@ -142,5 +156,30 @@ def test_web_entry_is_thin_adapter() -> None:
 
     # 三个业务动作都必须过 facade（list_tasks / get_task / mark_task）
     assert source.count("facade.invoke(") >= 3
+    # 配置向导端点只准转发给 setup_config，不许自己读写配置
+    assert "setup_config.save_config(" in source
+    assert "setup_config.test_canvas(" in source and "setup_config.test_ai(" in source
     # 刻意不暴露轮询端点（会烧 token）
     assert 'parsed.path == "/api/poll"' not in source
+
+
+def test_setup_config_has_no_business_imports() -> None:
+    """setup_config.py 是根级配置工具：只准标准库 + httpx/yaml，不许碰业务层。"""
+    path = PACKAGE_ROOT.parents[1] / "setup_config.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+
+    modules = {module for _, module in _iter_imports(tree)}
+    extra = sorted(modules - SETUP_CONFIG_ALLOWED_MODULES)
+    assert not extra, f"setup_config.py 出现白名单外的 import：{extra}"
+
+    imported: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                imported.add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                imported.add(alias.asname or alias.name)
+
+    violations = sorted(imported & BUSINESS_SYMBOLS)
+    assert not violations, f"setup_config.py 依赖了业务/领域符号：{violations}"

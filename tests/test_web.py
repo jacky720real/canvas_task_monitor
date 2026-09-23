@@ -9,10 +9,12 @@ web_main.py 是一个独立入口，它有自己的路由契约（4 个端点 + 
 from __future__ import annotations
 
 import asyncio
+import http.client
 import json
 import sys
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Iterator
 from http.server import ThreadingHTTPServer
@@ -90,7 +92,10 @@ def web_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]
             score=18,
         )
     )
-    monkeypatch.setattr(web_main, "_container", container)
+    # 注入"已配置 + 正常模式"的进程状态（不依赖开发机上的 .env）
+    monkeypatch.setattr(
+        web_main, "_state", web_main._AppState(container=container, setup_mode=False)
+    )
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), web_main.WebHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -156,3 +161,55 @@ def test_poll_endpoint_not_exposed(web_server: str) -> None:
 
     assert status == 404
     assert payload["ok"] is False
+
+
+@pytest.fixture
+def setup_mode_server(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
+    """起真实 HTTP 服务，但把进程状态置为"未配置"（配置模式）。"""
+    monkeypatch.setattr(web_main, "_state", web_main._AppState(container=None, setup_mode=True))
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), web_main.WebHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_setup_mode_redirects_root_to_setup(setup_mode_server: str) -> None:
+    """没配好时 / 必须 302 到 /setup：用户不该先看到一个空任务列表。"""
+    parsed = urllib.parse.urlsplit(setup_mode_server)
+    connection = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=5)
+    try:
+        connection.request("GET", "/")
+        response = connection.getresponse()
+        assert response.status == 302
+        assert response.getheader("Location") == "/setup"
+    finally:
+        connection.close()
+
+
+def test_setup_mode_blocks_api(setup_mode_server: str) -> None:
+    """配置模式下业务 API 一律 503（前端此时只该看到配置向导）。"""
+    status, payload = _request_http_error(setup_mode_server + "/api/tasks")
+    assert status == 503
+    assert payload["ok"] is False and "未配置" in payload["error"]
+
+    posted, marked = _request_http_error(f"{setup_mode_server}/api/tasks/1/done", method="POST")
+    assert posted == 503 and marked["ok"] is False
+
+
+def test_setup_page_accessible(setup_mode_server: str) -> None:
+    """配置向导页本身必须能打开（它就是未配置时的默认落地页）。"""
+    with urllib.request.urlopen(setup_mode_server + "/setup", timeout=5) as response:
+        html = response.read().decode("utf-8")
+
+    assert response.status == 200
+    assert "欢迎使用" in html
+    assert 'id="finish"' in html  # "完成配置，开始使用"
+    assert html.count('type="password"') >= 3  # Canvas Token / API Key / IMAP 密码都不外显
+    assert "test-canvas" in html and "test-ai" in html  # 两个"测试连接"按钮
+

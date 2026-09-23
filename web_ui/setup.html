@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>配置向导 · canvas_task_monitor</title>
+<style>
+  :root {
+    --bg: #FAF9F6;
+    --card: #FFFFFF;
+    --ink: #2A2A28;
+    --muted: #6E6A63;
+    --line: #EDEAE3;
+    --green: #4C8C5A;
+    --danger: #B4462F;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-size: 15px;
+    line-height: 1.5;
+  }
+  header { padding: 20px 20px 12px; background: var(--bg); border-bottom: 1px solid var(--line); }
+  h1 { margin: 0; font-size: 20px; font-weight: 600; }
+  .sub { color: var(--muted); font-size: 13px; }
+  main {
+    max-width: 640px;
+    margin: 0 auto;
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+  .card {
+    padding: 16px;
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+  }
+  .card h2 { margin: 0 0 8px; font-size: 16px; font-weight: 600; }
+  .hint { color: var(--muted); font-size: 13px; font-weight: 400; }
+  label { display: block; margin: 12px 0 4px; color: var(--muted); font-size: 13px; }
+  input[type="text"], input[type="password"], select {
+    width: 100%;
+    padding: 8px 10px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: #fff;
+    color: var(--ink);
+    font-size: 14px;
+    font-family: inherit;
+  }
+  input:focus, select:focus { outline: 2px solid #DCD7CC; }
+  details { margin-top: 12px; }
+  summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+  details ol { margin: 8px 0 0 20px; padding: 0; color: var(--muted); font-size: 13px; }
+  .actions { display: flex; align-items: center; gap: 12px; margin-top: 12px; flex-wrap: wrap; }
+  .btn {
+    padding: 8px 14px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--card);
+    color: var(--ink);
+    font-size: 14px;
+    font-family: inherit;
+    cursor: pointer;
+  }
+  .btn:disabled { opacity: 0.6; cursor: default; }
+  .btn.primary { padding: 10px 18px; background: var(--ink); border-color: var(--ink); color: #fff; font-weight: 600; }
+  .result { font-size: 13px; }
+  .result.ok { color: var(--green); }
+  .result.bad { color: var(--danger); }
+  .radio { display: flex; align-items: center; gap: 8px; margin: 8px 0; color: var(--ink); font-size: 14px; }
+  .hidden { display: none; }
+  footer.bar {
+    position: sticky;
+    bottom: 0;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 12px;
+    padding: 16px 20px;
+    background: var(--bg);
+    border-top: 1px solid var(--line);
+  }
+  #result-save { margin-right: auto; }
+</style>
+</head>
+<body>
+<header>
+  <h1>欢迎使用 · 配置向导</h1>
+  <span class="sub">三步走完：Canvas → AI →（邮箱可选）。配置只写进你自己电脑的 .env，不会上传。</span>
+</header>
+<main>
+  <section class="card">
+    <h2>1. Canvas LMS <span class="hint">必填</span></h2>
+    <label for="canvas-url">Canvas 网址</label>
+    <input id="canvas-url" type="text" placeholder="https://school.instructure.com" autocomplete="off">
+    <label for="canvas-token">访问令牌（Token）</label>
+    <input id="canvas-token" type="password" placeholder="粘贴 Canvas 生成的令牌" autocomplete="off">
+    <details>
+      <summary>从哪找 Token？</summary>
+      <ol>
+        <li>登录 Canvas，点左侧「账号」→「设置」</li>
+        <li>滑到页面底部「已批准的集成」，点「+ 新建访问令牌」</li>
+        <li>用途随便填（例如 ctm），有效期建议选到学期末，点「生成令牌」</li>
+        <li>复制那一串字符，粘贴到上面的输入框</li>
+      </ol>
+      <p class="hint">令牌只保存在本机 .env 文件里。想撤销随时回 Canvas 删掉这个令牌即可。</p>
+    </details>
+    <div class="actions">
+      <button class="btn" id="test-canvas">测试连接</button>
+      <span class="result" id="result-canvas"></span>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>2. AI 服务 <span class="hint">必填</span></h2>
+    <label for="ai-provider">服务商</label>
+    <select id="ai-provider">
+      <option value="deepseek">DeepSeek（推荐）</option>
+      <option value="openai">OpenAI</option>
+      <option value="custom">自定义</option>
+    </select>
+    <label for="ai-url">Base URL</label>
+    <input id="ai-url" type="text" placeholder="https://api.deepseek.com/v1" autocomplete="off">
+    <label for="ai-model">模型</label>
+    <input id="ai-model" type="text" placeholder="deepseek-chat" autocomplete="off">
+    <label for="ai-key">API Key</label>
+    <input id="ai-key" type="password" placeholder="sk-..." autocomplete="off">
+    <p class="hint">任何 OpenAI 兼容接口都能用（DeepSeek / OpenAI / 各家中转）。只用于把邮件和公告整理成任务清单。</p>
+    <div class="actions">
+      <button class="btn" id="test-ai">测试连接</button>
+      <span class="result" id="result-ai"></span>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>3. 邮箱 <span class="hint">可选</span></h2>
+    <p class="hint">不配也能用：只监控 Canvas 的作业与课程公告。邮箱只用来额外捕捉「Canvas 之外的通知邮件」。</p>
+    <label class="radio"><input type="radio" name="mail-mode" value="skip" checked> ◉ 先跳过（推荐）</label>
+    <label class="radio"><input type="radio" name="mail-mode" value="imap"> ○ 配置 IMAP</label>
+    <div id="imap-fields" class="hidden">
+      <label for="imap-host">IMAP 服务器</label>
+      <input id="imap-host" type="text" placeholder="outlook.office365.com / imap.qq.com" autocomplete="off">
+      <label for="imap-user">邮箱账号</label>
+      <input id="imap-user" type="text" placeholder="you@example.com" autocomplete="off">
+      <label for="imap-password">密码 / 授权码</label>
+      <input id="imap-password" type="password" placeholder="邮箱的 IMAP 授权码，不是登录密码" autocomplete="off">
+      <p class="hint">这里不做测试连接（IMAP 各家规则差异大，容易误报）。填错不影响 Canvas 部分，之后可以在 ⚙️ 设置里改。</p>
+    </div>
+  </section>
+</main>
+<footer class="bar">
+  <span class="result" id="result-save"></span>
+  <button class="btn primary" id="finish">完成配置，开始使用</button>
+</footer>
+<script>
+const PRESETS = {
+  deepseek: { url: "https://api.deepseek.com/v1", model: "deepseek-chat" },
+  openai: { url: "https://api.openai.com/v1", model: "gpt-4o-mini" },
+  custom: { url: "", model: "" },
+};
+
+const $ = (id) => document.getElementById(id);
+const value = (id) => $(id).value.trim();
+const mailMode = () => document.querySelector("input[name=mail-mode]:checked").value;
+
+/** 结果区三态：null=清空 / true=绿勾 / false=红叉。 */
+function showResult(id, ok, text) {
+  const node = $(id);
+  node.className = "result" + (ok === true ? " ok" : ok === false ? " bad" : "");
+  node.textContent = ok === null ? "" : `${ok ? "✓" : "✗"} ${text}`;
+}
+
+/** 请求期间立即 disable 并显示 loading，避免连点与"点了没反应"。 */
+function setBusy(id, busy, label) {
+  const node = $(id);
+  node.disabled = busy;
+  node.textContent = busy ? "测试中…" : label;
+}
+
+async function postJSON(url, body) {
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const payload = await response.json();
+    return payload && typeof payload === "object" ? payload : { ok: false, error: "返回值异常" };
+  } catch (error) {
+    return { ok: false, error: `请求失败：${error.message}（服务可能已退出）` };
+  }
+}
+
+$("ai-provider").addEventListener("change", (event) => {
+  const preset = PRESETS[event.target.value] || PRESETS.custom;
+  $("ai-url").value = preset.url;
+  $("ai-model").value = preset.model;
+});
+
+document.querySelectorAll("input[name=mail-mode]").forEach((radio) => {
+  radio.addEventListener("change", () => {
+    $("imap-fields").classList.toggle("hidden", mailMode() !== "imap");
+  });
+});
+
+$("test-canvas").addEventListener("click", async () => {
+  const baseUrl = value("canvas-url");
+  const token = value("canvas-token");
+  if (!/^https?:\/\//i.test(baseUrl)) {
+    return showResult("result-canvas", false, "网址要以 http:// 或 https:// 开头");
+  }
+  if (!token) return showResult("result-canvas", false, "请先填入访问令牌");
+
+  setBusy("test-canvas", true, "测试连接");
+  showResult("result-canvas", null, "");
+  const payload = await postJSON("/api/setup/test-canvas", { base_url: baseUrl, token });
+  setBusy("test-canvas", false, "测试连接");
+
+  if (!payload.ok) return showResult("result-canvas", false, payload.error || "连接失败");
+  const courses = (payload.courses || []).slice(0, 3).join("、");
+  showResult(
+    "result-canvas",
+    true,
+    courses ? `连接成功，课程：${courses}` : "连接成功（该账号下暂无可读课程）"
+  );
+});
+
+$("test-ai").addEventListener("click", async () => {
+  const baseUrl = value("ai-url");
+  const apiKey = value("ai-key");
+  const model = value("ai-model");
+  if (!/^https?:\/\//i.test(baseUrl)) {
+    return showResult("result-ai", false, "Base URL 要以 http:// 或 https:// 开头");
+  }
+  if (!apiKey) return showResult("result-ai", false, "请先填入 API Key");
+  if (!model) return showResult("result-ai", false, "请先填入模型名");
+
+  setBusy("test-ai", true, "测试连接");
+  showResult("result-ai", null, "");
+  const payload = await postJSON("/api/setup/test-ai", {
+    base_url: baseUrl,
+    api_key: apiKey,
+    model: model,
+  });
+  setBusy("test-ai", false, "测试连接");
+
+  if (payload.ok) showResult("result-ai", true, "连接成功，模型可用");
+  else showResult("result-ai", false, payload.error || "连接失败");
+});
+
+/** 收集表单（允许没测试过就保存，宽容）。返回 {error} 或 {canvas, ai, mail}。 */
+function collect() {
+  const canvas = { base_url: value("canvas-url"), token: value("canvas-token") };
+  if (!/^https?:\/\//i.test(canvas.base_url)) {
+    return { error: "Canvas 网址要以 http:// 或 https:// 开头" };
+  }
+  if (!canvas.token) return { error: "请填写 Canvas 访问令牌" };
+
+  const ai = { base_url: value("ai-url"), api_key: value("ai-key"), model: value("ai-model") };
+  if (!/^https?:\/\//i.test(ai.base_url)) {
+    return { error: "AI Base URL 要以 http:// 或 https:// 开头" };
+  }
+  if (!ai.api_key) return { error: "请填写 AI 的 API Key" };
+  if (!ai.model) return { error: "请填写模型名" };
+
+  let mail = null;
+  if (mailMode() === "imap") {
+    mail = {
+      provider: "imap",
+      host: value("imap-host"),
+      username: value("imap-user"),
+      password: $("imap-password").value,
+    };
+    if (!mail.host || !mail.username || !mail.password) {
+      return { error: "IMAP 三项都要填（想跳过就把邮箱那栏选回「先跳过」）" };
+    }
+  }
+  return { canvas: canvas, ai: ai, mail: mail };
+}
+
+$("finish").addEventListener("click", async () => {
+  const form = collect();
+  if (form.error) return showResult("result-save", false, form.error);
+
+  $("finish").disabled = true;
+  $("finish").textContent = "保存中…";
+  showResult("result-save", null, "");
+
+  const saved = await postJSON("/api/setup/save", { canvas: form.canvas, ai: form.ai, mail: form.mail });
+  if (!saved.ok) {
+    $("finish").disabled = false;
+    $("finish").textContent = "完成配置，开始使用";
+    return showResult("result-save", false, saved.error || "保存失败");
+  }
+
+  const reloaded = await postJSON("/api/setup/reload", {});
+  if (!reloaded.ok) {
+    $("finish").disabled = false;
+    $("finish").textContent = "完成配置，开始使用";
+    return showResult("result-save", false, reloaded.error || "配置仍不完整，请检查后重试");
+  }
+
+  showResult("result-save", true, "配置完成，正在进入任务清单…");
+  window.location.href = "/";
+});
+</script>
+</body>
+</html>
