@@ -172,21 +172,38 @@ def configured_sources(settings_path: Path) -> list[str]:
     return [str(item) for item in sources] if isinstance(sources, list) else []
 
 
-def canvas_credentials(env_path: Path) -> tuple[str, str]:
-    """取 Canvas 凭据：优先 .env（配置向导写的），缺失时才用进程环境变量。"""
+def canvas_credentials(env_path: Path, settings_path: Path | None = None) -> tuple[str, str]:
+    """取 Canvas 凭据，按"谁在生效"的顺序找：
+
+    1. .env（配置向导写的，也是 core/config.py 里 ${...} 的主要来源）
+    2. 进程环境变量（有人直接用系统环境变量提供凭据）
+    3. settings.yaml 的 canvas 段字面值（有人手改配置直接填死值、不用 .env）
+
+    任一处为空 / 仍是未解析的 ${CANVAS_TOKEN} 占位符，都视为"这里没填"，继续往后找。
+    """
     env = read_env(env_path)
-    base_url = env.get("CANVAS_BASE_URL") or os.environ.get("CANVAS_BASE_URL", "")
-    token = env.get("CANVAS_TOKEN") or os.environ.get("CANVAS_TOKEN", "")
-    return base_url.strip(), token.strip()
+    section = read_settings_sections(settings_path).get("canvas") if settings_path else None
+    canvas_section = section if isinstance(section, dict) else {}
+
+    def pick(env_key: str, section_key: str) -> str:
+        candidates = (env.get(env_key), os.environ.get(env_key), canvas_section.get(section_key))
+        for candidate in candidates:
+            if not _is_missing(candidate):
+                return str(candidate).strip()
+        return ""
+
+    return pick("CANVAS_BASE_URL", "base_url"), pick("CANVAS_TOKEN", "token")
 
 
-def check_canvas(env_path: Path, state_path: Path) -> tuple[bool, dict[str, Any]]:
+def check_canvas(
+    env_path: Path, state_path: Path, settings_path: Path | None = None
+) -> tuple[bool, dict[str, Any]]:
     """用当前凭据探一次 Canvas，并把结果写进 state.json（供 CLI 做 token 体检）。
 
     凭据完全没配时只返回错误、不写状态——免得在"根本没配 Canvas"的机器上
     留下一条假的失败记录，进而在 Web 上弹出一个莫名其妙的 banner。
     """
-    base_url, token = canvas_credentials(env_path)
+    base_url, token = canvas_credentials(env_path, settings_path)
     if not base_url or not token:
         return False, {"error": "Canvas 未配置（缺少 CANVAS_BASE_URL / CANVAS_TOKEN）"}
 

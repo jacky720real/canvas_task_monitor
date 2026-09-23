@@ -12,7 +12,8 @@ system_prompt: |
      字符串→""，数字→0，时间→null，数组→[]
   4. 每个素材条目最多产出一条任务；若判定为噪声（广告、垃圾邮件、无行动价值），
      在 reason 里说明并跳过。
-  5. 只允许从 allow_tags 枚举里选标签，最多 3 个。
+  5. tags 最多 5 个；优先从 allow_tags 中选择，也可以用其他简短的英文小写标签。
+     最终入库时，不在 allow_tags 里的标签会被系统过滤掉，不影响你的任务抽取。
   6. urgency / importance 只允许 0~5 的整数，必须给出 reason 支撑。
   7. 禁止输出 score 字段。综合分由外部系统根据 urgency 与 importance 计算。
 
@@ -33,6 +34,35 @@ user_prompt_template: |
     4=占比≥20%或期末/答辩相关；5=硬性门槛（必须完成才能通过/毕业）
 
   score 由系统计算，你不需要输出。只负责给 urgency 与 importance 打整数分。
+
+  ## 输出字段清单（严格按此命名，不要改动）
+
+  每条任务的字段如下，名称和类型必须完全一致：
+
+  - source: string，取值 canvas_assignment / canvas_announcement / mail
+  - external_id: string，从素材里的 external_id 原样复制
+  - change_type: string，取值 new / updated / removed（可选）
+  - category: string，取值 assignment / activity / reminder
+  - title: string，任务标题，1~120 字
+  - summary: string，任务摘要，0~300 字（可为空字符串 ""）
+  - course: string，课程名，0~80 字（可为空字符串 ""）
+  - due_at: string 或 null，ISO8601 时间，没有就填 null
+  - urgency: integer，0~5
+  - importance: integer，0~5
+  - tags: array of string，最多 5 个，每个 1-30 字符。
+          优先从下列常用标签中选择：
+          exam / paper / project / quiz / discussion / rule /
+          deadline_change / group / reading / admin
+          如果都不合适，可以用其他简短的英文小写标签。
+  - is_rule: boolean（可为 false）
+  - urgency_reason: string，0~200 字
+  - importance_reason: string，0~200 字
+
+  **必须避免的错误命名**（会导致整批失败）：
+  - ❌ course_id 或 course_name（正确是 course）
+  - ❌ reason（正确是 urgency_reason 和 importance_reason）
+  - ❌ score（系统会自己算，你不要输出）
+  - ❌ 任何未在上述清单中列出的字段
 
   ## 变更素材（JSON 数组）
   {{ changes_json }}
@@ -79,10 +109,13 @@ output_schema:
           importance: {type: integer, minimum: 0, maximum: 5}
           tags:
             type: array
-            maxItems: 3
+            # schema 上限宽松（10）：留余量防 LLM 偶发 6+ tags 时整批失败；
+            # 真正落库上限由 extractor 的 _sanitize_tags() [:5] 控制
+            maxItems: 10
             items:
               type: string
-              enum: [exam, paper, project, quiz, discussion, rule, deadline_change, group, reading, admin]
+              minLength: 1
+              maxLength: 30
           is_rule: {type: boolean}
           urgency_reason: {type: string, maxLength: 200}
           importance_reason: {type: string, maxLength: 200}

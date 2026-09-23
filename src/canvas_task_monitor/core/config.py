@@ -82,13 +82,23 @@ def _resolve_placeholders(value: Any) -> Any:
 
 
 def _replace_env_in_text(text: str) -> str:
-    """替换单个字符串内的全部 ${ENV_VAR}；变量未设置时保留原占位符并告警。"""
+    """替换单个字符串内的全部 ${ENV_VAR}；变量未设置时保留原占位符（设计行为）。
+
+    【为什么这里不再 WARNING】
+    "保留占位符"是刻意设计（延迟 fail-fast）：真正该报错的是
+    "启用了某个数据源但凭据没填"，那一层已经有 bootstrap 的
+    `_validate_all_config()` 给出点名到字段的错误。
+    如果在加载期为每个未设置的变量都打 WARNING，用户只要没用邮箱就会被刷 7 行
+    "MS_*/IMAP_* 未设置"，纯噪声且与他的操作无关。
+    """
 
     def _substitute(match: re.Match[str]) -> str:
         env_name = match.group(1)
         env_value = os.environ.get(env_name)
         if env_value is None:
-            logger.warning("环境变量 %s 未设置，配置项保留占位符 %s", env_name, match.group(0))
+            # 占位符保留是设计行为，报错交给 bootstrap 的配置预检（见函数 docstring）；
+            # 这里只留 debug 痕迹，排查"为什么占位符没被替换"时把日志级别调到 DEBUG 即可。
+            logger.debug("环境变量 %s 未设置，配置项保留占位符 %s", env_name, match.group(0))
             return match.group(0)
         return env_value
 

@@ -50,7 +50,8 @@ ai:
   api_key: "${LLM_API_KEY}"
   model: "${LLM_MODEL}"
   temperature: 0.1
-  max_output_tokens: 2000
+  max_output_tokens: 4000          # ★ 随 batch_size=15 上调：15 条任务的 JSON 很可能超 2000 tokens，
+                                   #   超了会被截断 → 空/坏 JSON → 整批失败
   timeout: 60                      # ★ 新增，LLM HTTP 超时（秒）
   retry:                           # ★ 新增，tenacity 重试参数
     max_attempts: 3
@@ -58,7 +59,8 @@ ai:
     backoff_min: 2
     backoff_max: 20
   skip_if_no_changes: true
-  batch_size: 5                    # 单次送 LLM 最多几条变更
+  batch_size: 15                   # 单次送 LLM 最多几条变更（原为 5：85 条变更被切成 17 批，
+                                   #   总调用次数太多、失败面大；15 条/批 → 6 批）
   score_weights:                   # ★ score 由代码计算
     urgency: 10
     importance: 8

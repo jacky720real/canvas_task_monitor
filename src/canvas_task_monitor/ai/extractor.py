@@ -17,7 +17,7 @@ import logging
 from typing import Any
 
 from ..core.models import ChangeRecord, TaskItem
-from .llm_client import LLMClient
+from .llm_client import EmptyLLMResponseError, LLMClient
 from .prompt_builder import build_user_prompt
 from .template import PromptTemplate
 
@@ -43,6 +43,8 @@ class TaskExtractor:
         self.client = client
         self.batch_size = max(int(batch_size), 1)
         self.score_weights = dict(score_weights or DEFAULT_SCORE_WEIGHTS)
+        # ★ 真机教训：tags 的 enum 约束已从 schema 撤掉，改由这里收敛（见 _sanitize_tags）
+        self.allow_tags = set(template.allow_tags)
 
     async def extract(self, changes: list[ChangeRecord]) -> tuple[list[TaskItem], bool]:
         """返回 (tasks, llm_ok)。
@@ -75,6 +77,17 @@ class TaskExtractor:
         for index, batch in enumerate(batches, start=1):
             try:
                 tasks.extend(await self._extract_batch(batch))
+            except EmptyLLMResponseError as exc:
+                # 【DeepSeek 偶发空 content】客户端已按 ai.retry 策略重试过，仍然为空说明
+                # 这一批这轮拿不到结果。单独记一条可读日志：真机上原本只能看到
+                # "Expecting value: line 1 column 1 (char 0)"，根本看不出是空响应。
+                llm_ok = False
+                logger.error(
+                    "第 %d/%d 批抽取失败（LLM 连续返回空 content，已在客户端重试）：%s",
+                    index,
+                    len(batches),
+                    exc,
+                )
             except Exception as exc:  # noqa: BLE001 —— 单批失败不能拖垮整轮，但要记 llm_ok=False
                 llm_ok = False
                 logger.error("第 %d/%d 批抽取失败：%s", index, len(batches), exc)
@@ -108,6 +121,9 @@ class TaskExtractor:
             )
         data.pop("score", None)
         data["score"] = compute_score(data["urgency"], data["importance"], self.score_weights)
+        # ★ tags 收敛到白名单（schema 已放宽，理由见 _sanitize_tags）。
+        #   注意 raw_json 记录的是 LLM 的**原始**输出，排查时能看出它原本给了什么标签。
+        data["tags"] = _sanitize_tags(data.get("tags"), self.allow_tags)
         # 原始输出留档：日后排查"这条任务是怎么抽出来的"时只认它
         data["raw_json"] = json.dumps(entry, ensure_ascii=False, default=str)
         return TaskItem(**data)
@@ -142,6 +158,23 @@ def _drop_forbidden_score(raw: dict[str, Any]) -> dict[str, Any]:
     result = dict(raw)
     result["tasks"] = cleaned
     return result
+
+
+def _sanitize_tags(tags: Any, allowed: set[str]) -> list[str]:
+    """过滤 tags，只保留在白名单里的，最多 5 个（与 schema 的 maxItems: 5 保持一致）。
+
+    【为什么在 extractor 里过滤而不是 schema 里强约束】
+    真机跑 DeepSeek 时发现：真实 Canvas 数据的主题远超预定义枚举，
+    LLM 会输出 scholarship / library_skills 等合理但枚举外的标签，
+    schema 强约束会导致**整批失败**（损失整批任务）。
+    改成 schema 放宽 + 这里过滤：不整批失败，且最终标签仍收敛到白名单。
+
+    将来要扩展标签，只改 config/templates/task_extract_template.yaml
+    的 allow_tags 即可，无需改本函数。
+    """
+    if not isinstance(tags, list):
+        return []
+    return [t for t in tags if isinstance(t, str) and t in allowed][:5]
 
 
 def compute_score(urgency: int, importance: int, weights: dict[str, int]) -> int:

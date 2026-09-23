@@ -80,7 +80,8 @@ def test_minimal_output_passes(template: PromptTemplate) -> None:
         pytest.param({"tasks": [{"source": "mail"}]}, id="missing-required"),
         pytest.param({"tasks": [_entry(urgency=99)]}, id="urgency-out-of-range"),
         pytest.param({"tasks": [_entry(category="unknown")]}, id="bad-category"),
-        pytest.param({"tasks": [_entry(tags=["whatever"])]}, id="bad-tag"),
+        # tags 不再是 enum（见 test_tags_is_free_string_array），但长度仍有约束
+        pytest.param({"tasks": [_entry(tags=["x" * 31])]}, id="tag-too-long"),
         pytest.param({"tasks": [_entry(score=74)]}, id="extra-field-score"),
     ],
 )
@@ -90,6 +91,24 @@ def test_invalid_output_is_rejected(template: PromptTemplate, payload: dict) -> 
         template.validate_output(payload)
 
 
+def test_tags_is_free_string_array(template: PromptTemplate) -> None:
+    """★ tags 不能是 enum：真机上 LLM 输出枚举外标签（scholarship 等）曾让整批失败。
+
+    maxItems 故意放宽到 10（留余量防 LLM 偶发多给几个 tag 就整批失败）；
+    真正落库上限 5 由 extractor 的 _sanitize_tags() 控制（见 test_ai_extractor.py）。
+    """
+    tags_schema = template.output_schema["properties"]["tasks"]["items"]["properties"]["tags"]
+
+    assert "enum" not in tags_schema["items"], "tags 不应有 enum 约束"
+    assert tags_schema["maxItems"] == 10
+    assert tags_schema["items"]["maxLength"] == 30
+
+
+def test_allow_tags_still_declared(template: PromptTemplate) -> None:
+    """allow_tags 仍需声明：它现在是 prompt 引导 + extractor 过滤的白名单。"""
+    assert len(template.allow_tags) > 0
+
+
 def test_error_message_contains_path_and_message(template: PromptTemplate) -> None:
     with pytest.raises(ValueError) as excinfo:
         template.validate_output({"tasks": [_entry(urgency=99)]})
@@ -97,3 +116,29 @@ def test_error_message_contains_path_and_message(template: PromptTemplate) -> No
     message = str(excinfo.value)
     assert "['tasks', 0, 'urgency']" in message
     assert "maximum" in message
+
+
+def test_prompt_lists_output_field_names(template: PromptTemplate) -> None:
+    """★ 真机教训：提示词必须把字段清单 + "别用错名字"写清楚。
+
+    背景：只写"必须匹配 schema"时，LLM 会猜成 course_id / course_name / reason，
+    整批因 additionalProperties=false 失败。这条是防回退的护栏。
+    """
+    prompt = template.user_prompt_template
+
+    assert "## 输出字段清单" in prompt
+    for field in (
+        "source",
+        "external_id",
+        "category",
+        "title",
+        "urgency_reason",
+        "importance_reason",
+    ):
+        assert field in prompt
+    # 高频错名字必须被点名（真机失败的直接原因）
+    assert "course_id" in prompt and "course_name" in prompt
+    assert "正确是 course" in prompt
+    # 只加说明、不加占位符：模板占位符依然只有 now_iso / changes_json 两个
+    assert prompt.count("{{") == 2
+

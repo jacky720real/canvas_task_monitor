@@ -148,7 +148,9 @@ def _report_canvas_token(args: argparse.Namespace) -> None:
         return
 
     env_path = settings_path.parent.parent / ".env"
-    ok, result = setup_config.check_canvas(env_path, setup_config.state_path_for(settings_path))
+    ok, result = setup_config.check_canvas(
+        env_path, setup_config.state_path_for(settings_path), settings_path
+    )
     if ok:
         return
 

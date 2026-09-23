@@ -37,6 +37,20 @@ class RetryableLLMError(RuntimeError):
     """可重试的 LLM 错误（429 / 5xx / 网络异常）。"""
 
 
+class EmptyLLMResponseError(RetryableLLMError):
+    """LLM 返回了空 content（DeepSeek 偶发）。
+
+    【为什么单独成类，并且归入"可重试"】
+    真机跑 DeepSeek 时遇到偶发空 content：HTTP 200、choices 也在、finish_reason=stop，
+    但 message.content 是空串。以前这种情况会让 json.loads("") 抛 JSONDecodeError，
+    而 JSONDecodeError 不在 tenacity 的重试名单里 —— 于是**整批（5 条变更）直接判失败、
+    这 5 条任务的 LLM 调用全部白花**，日志里只有一句"Expecting value: line 1 column 1"。
+
+    空响应属于典型的瞬时故障，原样重发一次多半就正常了，所以这里明确标成可重试：
+    交给 complete_json 里既有的重试策略处理（次数与退避由 settings.ai.retry 控制）。
+    """
+
+
 class OpenAICompatClient:
     """OpenAI 兼容客户端（按 settings.yaml 的 ai 段构造）。"""
 
@@ -72,6 +86,7 @@ class OpenAICompatClient:
         """调用模型并返回解析后的 JSON 对象。
 
         :raises ValueError: 返回内容不是合法 JSON，或顶层不是对象
+        :raises EmptyLLMResponseError: 重试耗尽后 content 仍为空（RetryableLLMError 子类）
         :raises RetryableLLMError: 重试耗尽后仍是 429 / 5xx / 网络异常
         :raises RuntimeError: 不可重试的 HTTP 错误（如 400 / 401）
         """
@@ -96,6 +111,14 @@ class OpenAICompatClient:
         async for attempt in retrying:
             with attempt:
                 content = await self._post_chat(system, user)
+                if not content.strip():
+                    # 【DeepSeek 偶发空 content 的补救】
+                    # 空响应是瞬时故障：标成可重试，由上面的重试策略（settings.ai.retry）
+                    # 再试；次数用完仍为空才抛给上层 —— extractor 记 llm_ok=False，
+                    # Poller 不写快照，下一轮重试同一批变更。
+                    raise EmptyLLMResponseError(
+                        "LLM 返回空 content（HTTP 200 但 message.content 为空）"
+                    )
         return _loads_json_object(content)
 
     async def _post_chat(self, system: str, user: str) -> str:
@@ -133,7 +156,16 @@ class OpenAICompatClient:
         if not choices:
             raise ValueError("LLM 响应缺少 choices")
         message = choices[0].get("message") or {}
-        return str(message.get("content") or "")
+        content = str(message.get("content") or "")
+        if not content.strip():
+            # 这里只记日志、不抛异常：重试决策统一放在 complete_json 的重试循环里。
+            # finish_reason 是排查关键：stop=真·偶发空响应，length=输出被 max_tokens 截断。
+            logger.warning(
+                "LLM 返回空 content：finish_reason=%s"
+                "（stop=偶发空响应；length=被 max_tokens 截断，需调大 ai.max_output_tokens）",
+                choices[0].get("finish_reason"),
+            )
+        return content
 
 
 def _strip_code_fence(content: str) -> str:
